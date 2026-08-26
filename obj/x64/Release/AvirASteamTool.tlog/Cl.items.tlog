@@ -1,0 +1,16 @@
+C:\Users\tarat\Documents\AvirA Steam Tool\src\main.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\main.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\src\app.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\app.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\src\theme.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\theme.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\src\util.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\util.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\src\http.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\http.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\src\rsa.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\rsa.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\src\steamcheck.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\steamcheck.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\src\accounts.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\accounts.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\src\steamctl.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\steamctl.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\ext\imgui\imgui.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\imgui.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\ext\imgui\imgui_draw.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\imgui_draw.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\ext\imgui\imgui_tables.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\imgui_tables.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\ext\imgui\imgui_widgets.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\imgui_widgets.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\ext\imgui\backends\imgui_impl_dx11.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\imgui_impl_dx11.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\ext\imgui\backends\imgui_impl_win32.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\imgui_impl_win32.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\ext\imgui\misc\cpp\imgui_stdlib.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\imgui_stdlib.obj
