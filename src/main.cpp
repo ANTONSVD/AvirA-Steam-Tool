@@ -13,6 +13,9 @@
 #pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "ole32.lib")
 
+extern "C" unsigned char logo_rawData[];
+static const size_t logo_rawData_len = 156784;
+
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg,
                                                              WPARAM wParam, LPARAM lParam);
 
@@ -107,13 +110,58 @@ static ID3D11ShaderResourceView* LoadTextureWIC(const wchar_t* path) {
     return srv;
 }
 
+static ID3D11ShaderResourceView* LoadTextureFromMemory(const unsigned char* data, size_t size) {
+    IWICImagingFactory* fac = nullptr;
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* dec = nullptr;
+    IWICBitmapFrameDecode* frame = nullptr;
+    IWICFormatConverter* conv = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    do {
+        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&fac)))) break;
+        if (FAILED(fac->CreateStream(&stream))) break;
+        if (FAILED(stream->InitializeFromMemory(const_cast<BYTE*>(data), (DWORD)size))) break;
+        if (FAILED(fac->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnLoad, &dec))) break;
+        if (FAILED(dec->GetFrame(0, &frame))) break;
+        if (FAILED(fac->CreateFormatConverter(&conv))) break;
+        if (FAILED(conv->Initialize(frame, GUID_WICPixelFormat32bppRGBA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) break;
+        UINT w = 0, h = 0;
+        conv->GetSize(&w, &h);
+        if (!w || !h) break;
+        std::vector<unsigned char> buf((size_t)w * h * 4);
+        if (FAILED(conv->CopyPixels(nullptr, w * 4, (UINT)buf.size(), buf.data()))) break;
+        D3D11_TEXTURE2D_DESC td{};
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA sd{buf.data(), w * 4, 0};
+        ID3D11Texture2D* tex = nullptr;
+        if (SUCCEEDED(g_dev->CreateTexture2D(&td, &sd, &tex))) {
+            g_dev->CreateShaderResourceView(tex, nullptr, &srv);
+            tex->Release();
+        }
+    } while (false);
+    if (conv) conv->Release();
+    if (frame) frame->Release();
+    if (dec) dec->Release();
+    if (stream) stream->Release();
+    if (fac) fac->Release();
+    return srv;
+}
+
 static ImTextureID LoadLogo() {
+    ID3D11ShaderResourceView* memSrv = LoadTextureFromMemory(logo_rawData, logo_rawData_len);
+    if (memSrv) return (ImTextureID)(intptr_t)memSrv;
     char exe[MAX_PATH] = {0};
     GetModuleFileNameA(nullptr, exe, MAX_PATH);
     std::string dir = exe;
     size_t p = dir.find_last_of("\\/");
     if (p != std::string::npos) dir = dir.substr(0, p);
-
     const char* candidates[] = {
         "AvirA Logo.png",
         "..\\..\\..\\AvirA Logo.png",

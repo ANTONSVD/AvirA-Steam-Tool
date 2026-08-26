@@ -7,6 +7,7 @@ C:\Users\tarat\Documents\AvirA Steam Tool\src\rsa.cpp;C:\Users\tarat\Documents\A
 C:\Users\tarat\Documents\AvirA Steam Tool\src\steamcheck.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\steamcheck.obj
 C:\Users\tarat\Documents\AvirA Steam Tool\src\accounts.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\accounts.obj
 C:\Users\tarat\Documents\AvirA Steam Tool\src\steamctl.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\steamctl.obj
+C:\Users\tarat\Documents\AvirA Steam Tool\src\logo_data.c;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\logo_data.obj
 C:\Users\tarat\Documents\AvirA Steam Tool\ext\imgui\imgui.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\imgui.obj
 C:\Users\tarat\Documents\AvirA Steam Tool\ext\imgui\imgui_draw.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\imgui_draw.obj
 C:\Users\tarat\Documents\AvirA Steam Tool\ext\imgui\imgui_tables.cpp;C:\Users\tarat\Documents\AvirA Steam Tool\obj\x64\Release\imgui_tables.obj

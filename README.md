@@ -47,8 +47,6 @@ bin\x64\Release\AvirASteamTool.exe
 "C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe" AvirASteamTool.vcxproj /p:Configuration=Release /p:Platform=x64
 ```
 
-Лого `AvirA Logo.png` должен лежать рядом с `exe` (автоматически копируется при сборке) или в корне проекта — грузится через WIC.
-
 ## Использование
 
 1. Запусти `AvirASteamTool.exe`
