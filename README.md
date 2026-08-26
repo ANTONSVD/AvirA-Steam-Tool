@@ -1,9 +1,5 @@
 # AvirA Steam Tool
 
-Переписанный на C++ чекер Steam-аккаунтов с кастомным GUI на ImGui — без Python, собирается обычным MSVC.
-
-Основано на https://github.com/CinAlix/Steam-Account-Checker, но полностью на WinAPI/DirectX11/WinHTTP/BCrypt, с каталогом аккаунтов и авто-входом в Steam.
-
 ![AvirA](AvirA%20Logo.png)
 <img width="1180" height="760" alt="image" src="https://github.com/user-attachments/assets/fde06e43-645c-4b7a-b2b7-ce494f1d6db0" />
 
