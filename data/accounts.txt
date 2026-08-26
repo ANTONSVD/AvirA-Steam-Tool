@@ -1,3 +1,0 @@
-# user	status	password
-﻿testuser123	valid	StrongP@ss123
-another_acc@hotmail.com	guard	qwerty456
