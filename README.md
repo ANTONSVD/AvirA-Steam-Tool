@@ -1,6 +1,5 @@
 # AvirA Steam Tool
 
-![AvirA](AvirA%20Logo.png)
 <img width="1180" height="760" alt="image" src="https://github.com/user-attachments/assets/fde06e43-645c-4b7a-b2b7-ce494f1d6db0" />
 
 ## Возможности
