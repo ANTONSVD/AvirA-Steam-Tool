@@ -307,8 +307,25 @@ static void DoLoginAsync(std::string user, std::string pass) {
 }
 
 void Init() {
-    S.dataDir = util::ExeDir() + "\\data";
-    CreateDirectoryA(S.dataDir.c_str(), nullptr);
+    S.dataDir = "C:\\AvirA Steam Tool";
+    if (!CreateDirectoryA(S.dataDir.c_str(), nullptr) &&
+        GetLastError() != ERROR_ALREADY_EXISTS) {
+        S.dataDir = util::ExeDir() + "\\data";
+        CreateDirectoryA(S.dataDir.c_str(), nullptr);
+    }
+    const char* files[] = {"accounts.txt", "hits.txt", "proxies.txt", "settings.ini"};
+    for (auto* f : files) {
+        std::string dst = S.dataDir + "\\" + f;
+        if (GetFileAttributesA(dst.c_str()) != INVALID_FILE_ATTRIBUTES) continue;
+        std::string src = util::ExeDir() + "\\data\\" + f;
+        std::string src2 = util::ExeDir() + "\\..\\" + f;
+        std::string src3 = util::ExeDir() + "\\..\\..\\" + f;
+        const char* from = nullptr;
+        if (GetFileAttributesA(src.c_str()) != INVALID_FILE_ATTRIBUTES) from = src.c_str();
+        else if (GetFileAttributesA(src2.c_str()) != INVALID_FILE_ATTRIBUTES) from = src2.c_str();
+        else if (GetFileAttributesA(src3.c_str()) != INVALID_FILE_ATTRIBUTES) from = src3.c_str();
+        if (from) CopyFileA(from, dst.c_str(), TRUE);
+    }
     LoadSettings();
     S.store.Load(S.dataDir + "\\accounts.txt");
 
@@ -566,6 +583,7 @@ static void ProgressPulse(const char* label, ImVec2 mn, ImVec2 mx) {
 
 static void RenderCheckerPage(float w, float h) {
     auto& p = theme::Pal();
+    ImVec2 pageOrg = ImGui::GetCursorScreenPos();
     ImGui::PushFont(g_fontBold);
     ImGui::TextUnformatted("Проверка аккаунтов");
     ImGui::PopFont();
@@ -615,7 +633,9 @@ static void RenderCheckerPage(float w, float h) {
     ImGui::Spacing();
 
     float leftW = 372.0f;
-    float bodyH = ImGui::GetContentRegionAvail().y;
+    ImVec2 cur = ImGui::GetCursorScreenPos();
+    float pageBottom = pageOrg.y + h;
+    float bodyH = pageBottom - cur.y;
 
     ImGui::BeginChild("left", ImVec2(leftW, bodyH));
     {
@@ -710,7 +730,7 @@ static void RenderCheckerPage(float w, float h) {
         ImVec2 org = ImGui::GetCursorScreenPos();
         float rw = ImGui::GetContentRegionAvail().x;
         ImDrawList* dl = ImGui::GetWindowDrawList();
-        float rh = ImGui::GetContentRegionAvail().y;
+        float rh = bodyH;
         dl->AddRectFilled(org, ImVec2(org.x + rw, org.y + rh),
                           ImGui::GetColorU32(ImVec4(p.panelSoft.x, p.panelSoft.y,
                                                     p.panelSoft.z, 0.42f)), 14);
@@ -1016,13 +1036,14 @@ static void ToggleRow(const char* label, const char* id, bool* v) {
 
 static void RenderSettingsPage(float w, float h) {
     auto& p = theme::Pal();
+    ImVec2 pageOrg = ImGui::GetCursorScreenPos();
     ImGui::PushFont(g_fontBold);
     ImGui::TextUnformatted("Настройки");
     ImGui::PopFont();
     ImGui::Spacing();
 
     float colW = (w - 12) * 0.5f;
-    float bodyH = ImGui::GetContentRegionAvail().y;
+    float bodyH = pageOrg.y + h - ImGui::GetCursorScreenPos().y;
 
     ImGui::BeginChild("setl", ImVec2(colW, bodyH));
     {
@@ -1080,7 +1101,7 @@ static void RenderSettingsPage(float w, float h) {
         if (pS != S.soundHit || pM != S.maskPass || pA != S.autoExport || pK != S.skipKnown)
             SaveSettings();
 
-        ImGui::SetCursorPos(ImVec2(18, 296));
+        ImGui::SetCursorPos(ImVec2(18, 316));
         if (theme::GlowButton("##rst", "Сбросить настройки", ImVec2(colW - 40, 36), false)) {
             S.threads = 8;
             S.soundHit = true;
@@ -1138,10 +1159,10 @@ static void RenderSettingsPage(float w, float h) {
         ImGui::TextUnformatted(S.steamPath.empty() ? "не найден" : S.steamPath.c_str());
         ImGui::PopFont();
 
-        float aboutY = ph - 118;
+        float aboutY = ph - 132;
         if (aboutY > 240) {
             dl->AddRectFilled(ImVec2(org.x + 14, org.y + aboutY),
-                              ImVec2(org.x + pw - 14, org.y + ph - 14),
+                              ImVec2(org.x + pw - 14, org.y + ph - 18),
                               ImGui::GetColorU32(theme::AccentGlow(0.07f)), 12);
             if (g_logo)
                 dl->AddImageRounded(g_logo, ImVec2(org.x + 26, org.y + aboutY + 14),
@@ -1350,7 +1371,6 @@ void Render() {
                     S.pageAnim = 0.f;
                 }
             }
-            ImGui::Spacing();
         }
 
         float cardY = bodyH - 118;
@@ -1360,7 +1380,7 @@ void Render() {
                           ImGui::GetColorU32(theme::AccentGlow(0.08f)), 13);
         dl->AddText(ImVec2(co.x + 16, co.y + 16), ImGui::GetColorU32(p.text), "AvirA Checker");
         char ver[64];
-        snprintf(ver, sizeof(ver), "v1.0 · valid %d · 2fa %d",
+        snprintf(ver, sizeof(ver), "valid %d · 2fa %d",
                  S.store.CountValid(), S.store.CountGuard());
         dl->AddText(ImVec2(co.x + 16, co.y + 34),
                     ImGui::GetColorU32(ImVec4(p.dim.x, p.dim.y, p.dim.z, 0.85f)), ver);

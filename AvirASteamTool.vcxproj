@@ -98,5 +98,8 @@
     <ClInclude Include="src\steamctl.h" />
     <ClInclude Include="src\checker.h" />
   </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="app.rc" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>
