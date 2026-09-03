@@ -18,6 +18,8 @@ static AccStatus TagStatus(const std::string& t) {
 void AccountStore::Load(const std::string& path) {
     std::string data;
     if (!util::ReadTextFile(path, data)) return;
+    long long base = util::NowMs() / 1000;
+    long long order = 0;
     for (auto& line : util::SplitLines(data)) {
         std::string l = util::Trim(line);
         if (l.empty() || l[0] == '#') continue;
@@ -29,7 +31,8 @@ void AccountStore::Load(const std::string& path) {
         a.user = l.substr(0, t1);
         a.status = TagStatus(l.substr(t1 + 1, t2 - t1 - 1));
         a.pass = l.substr(t2 + 1);
-        a.addedAt = 0;
+        a.addedAt = base - order;
+        order++;
         if (a.user.empty()) continue;
         for (auto& e : m_items)
             if (e.user == a.user) { e.status = a.status; e.pass = a.pass; goto next; }

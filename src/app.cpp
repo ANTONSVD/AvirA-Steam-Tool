@@ -59,6 +59,9 @@ static struct {
     bool maskPass = true;
     bool soundHit = true;
     bool autoExport = true;
+    bool skipKnown = true;
+    bool sortByNew = true;
+    int feedFilter = 0;
     char search[96] = {0};
     std::vector<FeedItem> feed;
     std::deque<ToastItem> toasts;
@@ -75,6 +78,7 @@ static struct {
     float navHover[3] = {0, 0, 0};
     ImVec2 winPos{}, winSize{};
     std::string dataDir;
+    int accountCount = 0;
 } S;
 
 static ImU32 StatusColor(AccStatus st) {
@@ -133,7 +137,8 @@ static void SaveSettings() {
                       "\npreset=" + std::to_string(theme::AccentPreset()) +
                       "\nsound=" + std::to_string(S.soundHit ? 1 : 0) +
                       "\nmask=" + std::to_string(S.maskPass ? 1 : 0) +
-                      "\nautoexport=" + std::to_string(S.autoExport ? 1 : 0) + "\n";
+                      "\nautoexport=" + std::to_string(S.autoExport ? 1 : 0) +
+                      "\nskipknown=" + std::to_string(S.skipKnown ? 1 : 0) + "\n";
     util::WriteTextFile(S.dataDir + "\\settings.ini", ini);
 }
 
@@ -150,6 +155,7 @@ static void LoadSettings() {
         else if (k == "sound") S.soundHit = v != 0;
         else if (k == "mask") S.maskPass = v != 0;
         else if (k == "autoexport") S.autoExport = v != 0;
+        else if (k == "skipknown") S.skipKnown = v != 0;
     }
 }
 
@@ -200,12 +206,34 @@ static void StartChecker() {
         PushToast(2, "Добавьте аккаунты: login:password");
         return;
     }
+    if (S.skipKnown) {
+        std::vector<std::string> known;
+        for (auto& a : S.store.Items())
+            known.push_back(a.user);
+        S.checker.SetKnownAccounts(known);
+    }
+    S.checker.SetSkipKnown(S.skipKnown);
+    int totalIn = (int)combos.size();
     S.checker.Start(combos, S.proxies, S.threads);
+    int skipped = totalIn - S.checker.Total();
+    if (skipped > 0)
+        PushToast(0, "Пропущено известных: " + std::to_string(skipped));
 }
 
 static void StopChecker() {
     S.checker.Stop();
     PushToast(0, "Проверка остановлена");
+}
+
+static void TogglePause() {
+    if (!S.checker.Running()) return;
+    if (S.checker.Paused()) {
+        S.checker.Resume();
+        PushToast(0, "Продолжено");
+    } else {
+        S.checker.Pause();
+        PushToast(0, "Пауза · Space — продолжить");
+    }
 }
 
 static void OnCheckerEvent(const Cred& c, const CheckOutcome& oc) {
@@ -386,6 +414,20 @@ static void DrawTitlebar(float w) {
     dl->AddText(ImGui::GetCursorScreenPos(),
                 ImGui::GetColorU32(theme::Pal().dim), "steam toolkit");
 
+    if (S.checker.Running()) {
+        float stX = org.x + w - 240;
+        const char* stText = S.checker.Paused() ? "PAUSED" : "SCANNING";
+        ImVec4 stCol = S.checker.Paused() ? theme::Pal().guard : theme::Pal().valid;
+        ImVec2 stz = ImGui::CalcTextSize(stText);
+        dl->AddText(ImVec2(stX, org.y + h * 0.5f - stz.y * 0.5f),
+                    ImGui::GetColorU32(stCol), stText);
+        char stn[32];
+        snprintf(stn, sizeof(stn), "%d/%d", S.checker.Done(), S.checker.Total());
+        ImVec2 snz = ImGui::CalcTextSize(stn);
+        dl->AddText(ImVec2(stX + stz.x + 10, org.y + h * 0.5f - snz.y * 0.5f),
+                    ImGui::GetColorU32(theme::Pal().dim), stn);
+    }
+
     ImGui::SetCursorScreenPos(ImVec2(org.x + w - 84, org.y + 11));
     bool minB = ChromeBtn("##min", 0);
     Tooltip("Свернуть");
@@ -529,14 +571,23 @@ static void RenderCheckerPage(float w, float h) {
     ImGui::PopFont();
     if (S.checker.Running()) {
         ImGui::SameLine(0, 12);
-        ImVec2 cp = ImGui::GetCursorScreenPos();
-        ImGui::Dummy(ImVec2(20, 22));
-        theme::Spinner(ImVec2(cp.x + 10, cp.y + 11), 8.5f, 2.2f,
-                       ImGui::GetColorU32(theme::AccentGlow(0.95f)), 1.5f);
-        ImGui::SameLine(0, 8);
-        char prog[48];
-        snprintf(prog, sizeof(prog), "%d / %d", S.checker.Done(), S.checker.Total());
-        ImGui::TextDisabled("%s", prog);
+        if (S.checker.Paused()) {
+            ImGui::TextDisabled("  пауза");
+        } else {
+            ImVec2 cp = ImGui::GetCursorScreenPos();
+            ImGui::Dummy(ImVec2(20, 22));
+            theme::Spinner(ImVec2(cp.x + 10, cp.y + 11), 8.5f, 2.2f,
+                           ImGui::GetColorU32(theme::AccentGlow(0.95f)), 1.5f);
+            ImGui::SameLine(0, 8);
+            char prog[64];
+            snprintf(prog, sizeof(prog), "%d/%d · %d/сек · ETA %02d:%02d",
+                     S.checker.Done(), S.checker.Total(), S.checker.Cps(),
+                     S.checker.EtaSec() / 60, S.checker.EtaSec() % 60);
+            ImGui::TextDisabled("%s", prog);
+        }
+    } else {
+        ImGui::SameLine(0, 12);
+        ImGui::TextDisabled("  Space — старт/пауза");
     }
 
     float total = (float)std::max(S.checker.Total(), 1);
@@ -608,19 +659,34 @@ static void RenderCheckerPage(float w, float h) {
         }
 
         ImGui::SetCursorPos(ImVec2(16, lh + 12));
-        float bw2 = (leftW - 32 - 12) * 0.5f;
-        if (theme::GlowButton("##load", "Загрузить .txt", ImVec2(bw2, 40), false))
+        bool running = S.checker.Running();
+        bool paused = S.checker.Paused();
+        int nb = running ? 3 : 2;
+        float gapB = 10;
+        float bwN = (lw - 32 - gapB * (nb - 1)) / nb;
+        if (theme::GlowButton("##load", running ? "Загрузить" : "Загрузить .txt",
+                              ImVec2(bwN, 40), false))
             LoadComboFile();
         Tooltip("Выбрать .txt файл с аккаунтами (login:password)");
-        ImGui::SameLine(0, 12);
-        if (S.checker.Running()) {
-            if (theme::GlowButton("##stop", "Остановить", ImVec2(bw2, 40), false))
+        ImGui::SameLine(0, gapB);
+        if (running) {
+            if (paused) {
+                if (theme::GlowButton("##resume", "Продолжить", ImVec2(bwN, 40), true))
+                    TogglePause();
+                Tooltip("Продолжить проверку (Space)");
+            } else {
+                if (theme::GlowButton("##pause", "Пауза", ImVec2(bwN, 40), false))
+                    TogglePause();
+                Tooltip("Поставить на паузу (Space)");
+            }
+            ImGui::SameLine(0, gapB);
+            if (theme::GlowButton("##stop", "Стоп", ImVec2(bwN, 40), false))
                 StopChecker();
             Tooltip("Остановить проверку");
         } else {
-            if (theme::GlowButton("##start", "Запустить проверку", ImVec2(bw2, 40), true))
+            if (theme::GlowButton("##start", "Запустить проверку", ImVec2(bwN, 40), true))
                 StartChecker();
-            Tooltip("Начать проверку загруженных аккаунтов");
+            Tooltip("Начать проверку загруженных аккаунтов (Space)");
         }
 
         ImGui::Spacing();
@@ -657,7 +723,31 @@ static void RenderCheckerPage(float w, float h) {
         ImGui::TextUnformatted("Лог проверки");
         ImGui::PopFont();
 
-        ImGui::SetCursorPos(ImVec2(rw - 90, 10));
+        const char* filters[5] = {"Все", "VALID", "2FA", "BAD", "ERR"};
+        float fx = rw - 90 - 5 * 54 - 8;
+        for (int i = 0; i < 5; i++) {
+            ImGui::SetCursorPos(ImVec2(fx + i * 54, 12));
+            bool sel = S.feedFilter == i;
+            ImVec2 bpos = ImGui::GetCursorScreenPos();
+            if (ImGui::InvisibleButton((std::string("flt") + std::to_string(i)).c_str(),
+                                       ImVec2(50, 22))) {
+                S.feedFilter = i;
+            }
+            ImDrawList* fdl = ImGui::GetWindowDrawList();
+            ImU32 bg = sel ? ImGui::GetColorU32(theme::AccentGlow(0.25f))
+                           : ImGui::GetColorU32(ImVec4(p.panelSoft.x, p.panelSoft.y,
+                                                      p.panelSoft.z, 0.5f));
+            fdl->AddRectFilled(bpos, ImVec2(bpos.x + 50, bpos.y + 22), bg, 7);
+            if (sel)
+                fdl->AddRect(bpos, ImVec2(bpos.x + 50, bpos.y + 22),
+                             ImGui::GetColorU32(theme::AccentGlow(0.7f)), 7, 0, 1.1f);
+            ImVec2 ftz = ImGui::CalcTextSize(filters[i]);
+            ImU32 ftc = sel ? ImGui::GetColorU32(p.text) : ImGui::GetColorU32(p.dim);
+            fdl->AddText(ImVec2(bpos.x + (50 - ftz.x) * 0.5f, bpos.y + (22 - ftz.y) * 0.5f),
+                         ftc, filters[i]);
+        }
+
+        ImGui::SetCursorPos(ImVec2(rw - 84, 9));
         ImGui::PushID("clr");
         if (theme::IconButton("##c", g_icTrash.c_str(), 26)) {
             std::lock_guard<std::mutex> l(S.mtx);
@@ -678,6 +768,10 @@ static void RenderCheckerPage(float w, float h) {
             float y = 0;
             for (int i = (int)items.size() - 1; i >= 0; i--) {
                 FeedItem& it = items[i];
+                if (S.feedFilter == 1 && it.st != AccStatus::Valid) continue;
+                if (S.feedFilter == 2 && it.st != AccStatus::Guard) continue;
+                if (S.feedFilter == 3 && it.st != AccStatus::Invalid) continue;
+                if (S.feedFilter == 4 && it.st != AccStatus::Error && it.st != AccStatus::RateLimited) continue;
                 float age = (now - it.born) / 1000.f;
                 float a = theme::Ease(age / 0.3f);
                 float slide = (1.f - a) * 22.f;
@@ -719,7 +813,9 @@ static void RenderAccountsPage(float w, float h) {
     auto& p = theme::Pal();
     float startY = ImGui::GetCursorPosY();
     ImGui::PushFont(g_fontBold);
-    ImGui::TextUnformatted("Каталог аккаунтов");
+    char title[80];
+    snprintf(title, sizeof(title), "Каталог аккаунтов  ·  %d", S.store.CountValid() + S.store.CountGuard());
+    ImGui::TextUnformatted(title);
     ImGui::PopFont();
     ImGui::SameLine();
 
@@ -738,6 +834,15 @@ static void RenderAccountsPage(float w, float h) {
     ImGui::SameLine(0, 4);
     if (theme::IconButton("##ref", g_icRefresh.c_str(), 30)) RefreshSteamInfo();
     Tooltip("Обновить статус Steam");
+    ImGui::SameLine(0, 4);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, S.sortByNew ? 1.f : 0.45f);
+    if (theme::IconButton("##sort", g_icRefresh.c_str(), 30,
+                          ImGui::GetColorU32(S.sortByNew ? theme::AccentGlow(0.95f)
+                                                         : p.dim)))
+        S.sortByNew = !S.sortByNew;
+    ImGui::PopStyleVar();
+    Tooltip(S.sortByNew ? "Сортировка: новые сверху (клик — по алфавиту)"
+                        : "Сортировка: по алфавиту (клик — новые сверху)");
 
     ImGui::Spacing();
 
@@ -770,11 +875,16 @@ static void RenderAccountsPage(float w, float h) {
         std::string q = util::ToLower(S.search);
         int shown = 0;
         auto& items = S.store.Items();
-        float avail = ImGui::GetContentRegionAvail().y;
-        for (int i = (int)items.size() - 1; i >= 0; i--) {
-            Account& a = items[i];
-            if (a.status != AccStatus::Valid && a.status != AccStatus::Guard) continue;
-            if (!q.empty() && util::ToLower(a.user).find(q) == std::string::npos) continue;
+        std::vector<Account*> rows;
+        for (auto& a : items)
+            if (a.status == AccStatus::Valid || a.status == AccStatus::Guard)
+                if (q.empty() || util::ToLower(a.user).find(q) != std::string::npos)
+                    rows.push_back(&a);
+        if (S.sortByNew && rows.size() > 1)
+            std::sort(rows.begin(), rows.end(),
+                      [](const Account* a, const Account* b) { return a->addedAt > b->addedAt; });
+        for (auto* pa : rows) {
+            Account& a = *pa;
             shown++;
 
             float rowH = 52;
@@ -934,7 +1044,7 @@ static void RenderSettingsPage(float w, float h) {
         ImGui::SetCursorPos(ImVec2(18, 50));
         const char* names[6] = {"Аметист", "Мята", "Закат", "Океан", "Янтарь", "Орхидея"};
         for (int i = 0; i < 6; i++) {
-            ImGui::SetCursorPos(ImVec2(18 + i * 52, 52));
+            ImGui::SetCursorPos(ImVec2(18.f + i * 52.f, 52.f));
             ImGui::PushID(i);
             ImVec2 sw(ImGui::GetCursorScreenPos());
             bool sel = theme::AccentPreset() == i;
@@ -956,16 +1066,32 @@ static void RenderSettingsPage(float w, float h) {
         ImGui::TextDisabled("%s", names[theme::AccentPreset()]);
 
         ImGui::SetCursorPos(ImVec2(18, 138));
-        bool pS = S.soundHit, pM = S.maskPass, pA = S.autoExport;
+        bool pS = S.soundHit, pM = S.maskPass, pA = S.autoExport, pK = S.skipKnown;
         ImGui::BeginGroup();
         ToggleRow("Звук при находке", "##snd", &S.soundHit);
         ImGui::Spacing();
         ToggleRow("Скрывать пароли", "##msk", &S.maskPass);
         ImGui::Spacing();
         ToggleRow("Автоэкспорт hits.txt", "##aex", &S.autoExport);
+        ImGui::Spacing();
+        ToggleRow("Пропускать известных", "##skw", &S.skipKnown);
+        Tooltip("Не проверять аккаунты, уже лежащие в каталоге");
         ImGui::EndGroup();
-        if (pS != S.soundHit || pM != S.maskPass || pA != S.autoExport)
+        if (pS != S.soundHit || pM != S.maskPass || pA != S.autoExport || pK != S.skipKnown)
             SaveSettings();
+
+        ImGui::SetCursorPos(ImVec2(18, 296));
+        if (theme::GlowButton("##rst", "Сбросить настройки", ImVec2(colW - 40, 36), false)) {
+            S.threads = 8;
+            S.soundHit = true;
+            S.maskPass = true;
+            S.autoExport = true;
+            S.skipKnown = true;
+            theme::SetAccentPreset(0);
+            SaveSettings();
+            PushToast(0, "Настройки сброшены");
+        }
+        Tooltip("Вернуть всё к дефолту");
     }
     ImGui::EndChild();
 
@@ -1011,6 +1137,25 @@ static void RenderSettingsPage(float w, float h) {
         ImGui::SetCursorPos(ImVec2(18, 204));
         ImGui::TextUnformatted(S.steamPath.empty() ? "не найден" : S.steamPath.c_str());
         ImGui::PopFont();
+
+        float aboutY = ph - 118;
+        if (aboutY > 240) {
+            dl->AddRectFilled(ImVec2(org.x + 14, org.y + aboutY),
+                              ImVec2(org.x + pw - 14, org.y + ph - 14),
+                              ImGui::GetColorU32(theme::AccentGlow(0.07f)), 12);
+            if (g_logo)
+                dl->AddImageRounded(g_logo, ImVec2(org.x + 26, org.y + aboutY + 14),
+                                    ImVec2(org.x + 62, org.y + aboutY + 50),
+                                    ImVec2(0, 0), ImVec2(1, 1), IM_COL32_WHITE, 8);
+            dl->AddText(ImVec2(org.x + 76, org.y + aboutY + 16),
+                        ImGui::GetColorU32(p.text), "AvirA Steam Tool");
+            dl->AddText(ImVec2(org.x + 76, org.y + aboutY + 36),
+                        ImGui::GetColorU32(ImVec4(p.dim.x, p.dim.y, p.dim.z, 0.8f)),
+                        "v1.1 · C++ / DX11 / WinHTTP");
+            dl->AddText(ImVec2(org.x + 76, org.y + aboutY + 54),
+                        ImGui::GetColorU32(ImVec4(p.dim.x, p.dim.y, p.dim.z, 0.55f)),
+                        "github.com/ANTONSVD/AvirA-Steam-Tool");
+        }
     }
     ImGui::EndChild();
 }
@@ -1135,6 +1280,13 @@ void Render() {
 
     S.intro = theme::Approach(S.intro, 1.0f, 3.2f, dt);
     S.pageAnim = theme::Approach(S.pageAnim, 1.0f, 9.f, dt);
+
+    if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Space)) {
+        if (S.checker.Running())
+            TogglePause();
+        else
+            StartChecker();
+    }
 
     float targetV = (float)S.checker.Hits();
     S.dispValid = theme::Approach(S.dispValid, targetV, 8.f, dt);

@@ -1,8 +1,11 @@
 #include "steamctl.h"
+#include "util.h"
 #include <windows.h>
 #include <tlhelp32.h>
 #include <thread>
 #include <chrono>
+#include <fstream>
+#include <sstream>
 
 static std::string RegGetStr(HKEY root, const char* key, const char* value) {
     HKEY h = nullptr;
@@ -27,7 +30,36 @@ std::string GetSteamPath() {
 }
 
 std::string GetSteamAutoLoginUser() {
-    return RegGetStr(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "AutoLoginUser");
+    std::string u = RegGetStr(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "AutoLoginUser");
+    if (!u.empty()) return u;
+    std::string path = RegGetStr(HKEY_CURRENT_USER, "Software\\Valve\\Steam", "SteamPath");
+    if (path.empty()) return "";
+    std::string vdf;
+    if (!util::ReadTextFile(path + "/config/loginusers.vdf", vdf)) return "";
+    std::string low = util::ToLower(vdf);
+    size_t pos = 0;
+    std::string best;
+    while (true) {
+        size_t blk = low.find("{", pos);
+        if (blk == std::string::npos) break;
+        size_t end = low.find("}", blk);
+        if (end == std::string::npos) break;
+        std::string section = low.substr(blk, end - blk);
+        if (section.find("\"mostrecent\"\t\t\"1\"") != std::string::npos ||
+            section.find("\"mostrecent\" \"1\"") != std::string::npos) {
+            size_t an = low.find("\"accountname\"", blk);
+            if (an < end) {
+                size_t q1 = low.find('"', an + 13);
+                size_t q2 = low.find('"', q1 + 1);
+                if (q1 != std::string::npos && q2 != std::string::npos) {
+                    best = vdf.substr(q1 + 1, q2 - q1 - 1);
+                    break;
+                }
+            }
+        }
+        pos = end + 1;
+    }
+    return best;
 }
 
 bool IsSteamRunning() {
