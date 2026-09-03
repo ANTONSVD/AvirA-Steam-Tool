@@ -1,6 +1,7 @@
 # AvirA Steam Tool
 
-<img width="1180" height="760" alt="image" src="https://github.com/user-attachments/assets/fde06e43-645c-4b7a-b2b7-ce494f1d6db0" />
+<img width="1180" height="760" alt="image" src="https://github.com/user-attachments/assets/9d8318ce-3c10-4063-852d-88d7a2d5f613" />
+
 
 ## Возможности
 
