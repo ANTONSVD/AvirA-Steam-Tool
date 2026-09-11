@@ -60,6 +60,7 @@ static struct {
     bool soundHit = true;
     bool autoExport = true;
     bool skipKnown = true;
+    bool checkBans = true;
     bool sortByNew = true;
     int feedFilter = 0;
     char search[96] = {0};
@@ -138,7 +139,8 @@ static void SaveSettings() {
                       "\nsound=" + std::to_string(S.soundHit ? 1 : 0) +
                       "\nmask=" + std::to_string(S.maskPass ? 1 : 0) +
                       "\nautoexport=" + std::to_string(S.autoExport ? 1 : 0) +
-                      "\nskipknown=" + std::to_string(S.skipKnown ? 1 : 0) + "\n";
+                      "\nskipknown=" + std::to_string(S.skipKnown ? 1 : 0) +
+                      "\ncheckbans=" + std::to_string(S.checkBans ? 1 : 0) + "\n";
     util::WriteTextFile(S.dataDir + "\\settings.ini", ini);
 }
 
@@ -156,6 +158,7 @@ static void LoadSettings() {
         else if (k == "mask") S.maskPass = v != 0;
         else if (k == "autoexport") S.autoExport = v != 0;
         else if (k == "skipknown") S.skipKnown = v != 0;
+        else if (k == "checkbans") S.checkBans = v != 0;
     }
 }
 
@@ -255,6 +258,10 @@ static void DrainEvents() {
         }
         if (e.oc.status == AccStatus::Valid || e.oc.status == AccStatus::Guard) {
             S.store.AddOrUpdate(e.cred, e.oc.status);
+            if (!e.oc.steamid.empty())
+                S.store.SetSteamId(e.cred.user, e.oc.steamid);
+            if (!e.oc.ban.empty())
+                S.store.SetBan(e.cred.user, e.oc.ban, e.oc.banDays);
             S.store.Save(S.dataDir + "\\accounts.txt");
             if (S.autoExport)
                 util::AppendTextFile(S.dataDir + "\\hits.txt",
@@ -262,9 +269,16 @@ static void DrainEvents() {
         }
         if (e.oc.status == AccStatus::Valid) {
             if (S.soundHit) MessageBeep(MB_ICONASTERISK);
-            PushToast(1, "VALID · " + e.cred.user);
+            std::string t = "VALID · " + e.cred.user;
+            if (!e.oc.ban.empty())
+                t += " · " + e.oc.ban + (e.oc.banDays > 0
+                    ? " (" + std::to_string(e.oc.banDays) + " дн.)" : "");
+            PushToast(1, t);
         } else if (e.oc.status == AccStatus::Guard) {
-            PushToast(2, "2FA GUARD · " + e.cred.user);
+            std::string t = "2FA GUARD · " + e.cred.user;
+            if (!e.oc.ban.empty())
+                t += " · " + e.oc.ban;
+            PushToast(2, t);
         }
     }
     if (S.checker.Running() && S.checker.Total() > 0 &&
@@ -281,6 +295,48 @@ static void RefreshSteamInfo() {
     S.steamRunning = IsSteamRunning();
     S.currentUser = GetSteamAutoLoginUser();
     S.lastSteamCheck = util::NowMs();
+}
+
+static std::atomic<bool> g_banScanBusy{false};
+
+static void RefreshBansAsync() {
+    if (g_banScanBusy.exchange(true)) return;
+    std::thread([]() {
+        std::vector<Account> snapshot;
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            snapshot = S.store.Items();
+        }
+        int found = 0;
+        int updated = 0;
+        for (auto& a : snapshot) {
+            if (a.status != AccStatus::Valid && a.status != AccStatus::Guard) continue;
+            BanResult br;
+            std::string sid = a.steamid;
+            if (sid.empty()) {
+                CheckOutcome co = CheckSteamAccount(a.user, a.pass, "");
+                if (co.steamid.size() >= 10) {
+                    sid = co.steamid;
+                    S.store.SetSteamId(a.user, sid);
+                    updated++;
+                }
+            }
+            if (!sid.empty())
+                br = FetchBanBySteamId(sid);
+            else
+                br = FetchBanByAccountName(a.user);
+            if (br.ok) {
+                S.store.SetBan(a.user, br.ban, br.days);
+                found++;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        }
+        S.store.Save(S.dataDir + "\\accounts.txt");
+        PushToast(found > 0 ? 2 : 0,
+                  "Баны обновлены · найдено: " + std::to_string(found) +
+                      " · sid: " + std::to_string(updated));
+        g_banScanBusy = false;
+    }).detach();
 }
 
 static void DoLoginAsync(std::string user, std::string pass) {
@@ -327,6 +383,7 @@ void Init() {
         if (from) CopyFileA(from, dst.c_str(), TRUE);
     }
     LoadSettings();
+    steamcheck::SetBanCheck(S.checkBans);
     S.store.Load(S.dataDir + "\\accounts.txt");
 
     g_icPlay = Ic(0xE768);
@@ -855,6 +912,11 @@ static void RenderAccountsPage(float w, float h) {
     if (theme::IconButton("##ref", g_icRefresh.c_str(), 30)) RefreshSteamInfo();
     Tooltip("Обновить статус Steam");
     ImGui::SameLine(0, 4);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, g_banScanBusy ? 0.45f : 1.f);
+    if (theme::IconButton("##bans", g_icLock.c_str(), 30)) RefreshBansAsync();
+    ImGui::PopStyleVar();
+    Tooltip("Проверить VAC/гейм-баны у всех аккаунтов каталога");
+    ImGui::SameLine(0, 4);
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, S.sortByNew ? 1.f : 0.45f);
     if (theme::IconButton("##sort", g_icRefresh.c_str(), 30,
                           ImGui::GetColorU32(S.sortByNew ? theme::AccentGlow(0.95f)
@@ -941,12 +1003,23 @@ static void RenderAccountsPage(float w, float h) {
                         ImGui::GetColorU32(ImVec4(p.dim.x, p.dim.y, p.dim.z, 0.9f)),
                         masked.c_str());
 
+            float badgeX = org.x + rw - 320;
             if (a.status == AccStatus::Guard) {
-                ImGui::SetCursorScreenPos(ImVec2(org.x + rw - 320, org.y + 16));
+                ImGui::SetCursorScreenPos(ImVec2(badgeX, org.y + 16));
                 theme::Badge("2FA", ImGui::GetColorU32(p.guard));
             } else {
-                ImGui::SetCursorScreenPos(ImVec2(org.x + rw - 320, org.y + 16));
+                ImGui::SetCursorScreenPos(ImVec2(badgeX, org.y + 16));
                 theme::Badge("VALID", ImGui::GetColorU32(p.valid));
+            }
+            if (!a.ban.empty()) {
+                badgeX -= 20;
+                std::string banTxt = a.ban;
+                if (a.banDays > 0)
+                    banTxt += " " + std::to_string(a.banDays) + "d";
+                ImVec2 bts = ImGui::CalcTextSize(banTxt.c_str());
+                badgeX -= bts.x + 16;
+                ImGui::SetCursorScreenPos(ImVec2(badgeX, org.y + 16));
+                theme::Badge(banTxt.c_str(), ImGui::GetColorU32(p.bad));
             }
 
             bool busy = S.loggingUser == a.user;
@@ -1087,7 +1160,8 @@ static void RenderSettingsPage(float w, float h) {
         ImGui::TextDisabled("%s", names[theme::AccentPreset()]);
 
         ImGui::SetCursorPos(ImVec2(18, 138));
-        bool pS = S.soundHit, pM = S.maskPass, pA = S.autoExport, pK = S.skipKnown;
+        bool pS = S.soundHit, pM = S.maskPass, pA = S.autoExport, pK = S.skipKnown,
+             pB = S.checkBans;
         ImGui::BeginGroup();
         ToggleRow("Звук при находке", "##snd", &S.soundHit);
         ImGui::Spacing();
@@ -1097,9 +1171,15 @@ static void RenderSettingsPage(float w, float h) {
         ImGui::Spacing();
         ToggleRow("Пропускать известных", "##skw", &S.skipKnown);
         Tooltip("Не проверять аккаунты, уже лежащие в каталоге");
+        ImGui::Spacing();
+        ToggleRow("Проверять баны", "##bns", &S.checkBans);
+        Tooltip("Тянуть VAC/Game-бан с профиля (лишний трафик)");
         ImGui::EndGroup();
-        if (pS != S.soundHit || pM != S.maskPass || pA != S.autoExport || pK != S.skipKnown)
+        if (pS != S.soundHit || pM != S.maskPass || pA != S.autoExport ||
+            pK != S.skipKnown || pB != S.checkBans) {
+            steamcheck::SetBanCheck(S.checkBans);
             SaveSettings();
+        }
 
         ImGui::SetCursorPos(ImVec2(18, 316));
         if (theme::GlowButton("##rst", "Сбросить настройки", ImVec2(colW - 40, 36), false)) {
@@ -1108,6 +1188,8 @@ static void RenderSettingsPage(float w, float h) {
             S.maskPass = true;
             S.autoExport = true;
             S.skipKnown = true;
+            S.checkBans = true;
+            steamcheck::SetBanCheck(true);
             theme::SetAccentPreset(0);
             SaveSettings();
             PushToast(0, "Настройки сброшены");

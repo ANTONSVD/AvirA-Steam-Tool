@@ -105,9 +105,12 @@ private:
                 oc = CheckSteamAccount(cred.user, cred.pass, proxy);
                 if (oc.status != AccStatus::Error && oc.status != AccStatus::RateLimited)
                     break;
-                int base = oc.status == AccStatus::RateLimited ? 1600 : 900;
-                int jitter = (int)(rng() % 600);
-                std::this_thread::sleep_for(std::chrono::milliseconds(base * (attempt + 1) + jitter));
+                static const int rlWaits[] = {1500, 3500, 7000, 12000};
+                int wait = oc.status == AccStatus::RateLimited
+                               ? rlWaits[attempt < 4 ? attempt : 3]
+                               : 900 * (attempt + 1);
+                wait += (int)(rng() % 800);
+                std::this_thread::sleep_for(std::chrono::milliseconds(wait));
             }
             if (m_stopFlag) break;
 

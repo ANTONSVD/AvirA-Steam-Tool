@@ -35,6 +35,7 @@
   <PropertyGroup>
     <OutDir>$(SolutionDir)bin\$(Platform)\$(Configuration)\</OutDir>
     <IntDir>$(SolutionDir)obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>AvirASteamTool </TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
@@ -97,6 +98,8 @@
     <ClInclude Include="src\accounts.h" />
     <ClInclude Include="src\steamctl.h" />
     <ClInclude Include="src\checker.h" />
+    <ClInclude Include="src\throttle.h" />
+    <ClInclude Include="src\banparse.h" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="app.rc" />

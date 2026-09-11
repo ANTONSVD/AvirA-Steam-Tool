@@ -30,21 +30,53 @@ void AccountStore::Load(const std::string& path) {
         Account a;
         a.user = l.substr(0, t1);
         a.status = TagStatus(l.substr(t1 + 1, t2 - t1 - 1));
-        a.pass = l.substr(t2 + 1);
+        size_t t3 = l.find('\t', t2 + 1);
+        if (t3 != std::string::npos) {
+            a.pass = l.substr(t2 + 1, t3 - t2 - 1);
+            size_t cur = t3 + 1;
+            while (cur < l.size()) {
+                size_t tn = l.find('\t', cur);
+                std::string field = tn == std::string::npos
+                                        ? l.substr(cur)
+                                        : l.substr(cur, tn - cur);
+                if (field.rfind("sid:", 0) == 0) {
+                    a.steamid = field.substr(4);
+                } else if (a.ban.empty()) {
+                    a.ban = field;
+                } else {
+                    a.banDays = atoi(field.c_str());
+                }
+                if (tn == std::string::npos) break;
+                cur = tn + 1;
+            }
+        } else {
+            a.pass = l.substr(t2 + 1);
+        }
         a.addedAt = base - order;
         order++;
         if (a.user.empty()) continue;
         for (auto& e : m_items)
-            if (e.user == a.user) { e.status = a.status; e.pass = a.pass; goto next; }
+            if (e.user == a.user) {
+                e.status = a.status;
+                e.pass = a.pass;
+                e.ban = a.ban;
+                e.banDays = a.banDays;
+                e.steamid = a.steamid;
+                goto next;
+            }
         m_items.push_back(a);
     next:;
     }
 }
 
 void AccountStore::Save(const std::string& path) {
-    std::string out = "# user\tstatus\tpassword\n";
-    for (auto& a : m_items)
-        out += a.user + "\t" + StatusTag(a.status) + "\t" + a.pass + "\n";
+    std::string out = "# user\tstatus\tpassword[...tab...ban[...tab...days][...tab...sid:steamid]\n";
+    for (auto& a : m_items) {
+        out += a.user + "\t" + StatusTag(a.status) + "\t" + a.pass;
+        if (!a.ban.empty()) out += "\t" + a.ban + "\t" + std::to_string(a.banDays);
+        if (!a.steamid.empty()) out += "\tsid:" + a.steamid;
+        out += "\n";
+    }
     util::WriteTextFile(path, out);
 }
 
@@ -67,6 +99,25 @@ bool AccountStore::AddOrUpdate(const Cred& cred, AccStatus st) {
     a.addedAt = util::NowMs() / 1000;
     m_items.push_back(a);
     return true;
+}
+
+void AccountStore::SetBan(const std::string& user, const std::string& ban, int days) {
+    for (auto& a : m_items) {
+        if (a.user == user) {
+            a.ban = ban;
+            a.banDays = days;
+            return;
+        }
+    }
+}
+
+void AccountStore::SetSteamId(const std::string& user, const std::string& steamid) {
+    for (auto& a : m_items) {
+        if (a.user == user) {
+            if (!steamid.empty()) a.steamid = steamid;
+            return;
+        }
+    }
 }
 
 bool AccountStore::Remove(const std::string& user) {

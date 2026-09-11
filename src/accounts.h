@@ -8,6 +8,8 @@ public:
     void Load(const std::string& path);
     void Save(const std::string& path);
     bool AddOrUpdate(const Cred& cred, AccStatus st);
+    void SetBan(const std::string& user, const std::string& ban, int days);
+    void SetSteamId(const std::string& user, const std::string& steamid);
     bool Remove(const std::string& user);
     void Clear();
     Account* Find(const std::string& user);

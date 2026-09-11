@@ -13,11 +13,17 @@ struct Account {
     std::string pass;
     AccStatus status = AccStatus::None;
     long long addedAt = 0;
+    std::string ban;
+    int banDays = 0;
+    std::string steamid;
 };
 
 struct CheckOutcome {
     AccStatus status;
     std::string message;
+    std::string steamid;
+    std::string ban;
+    int banDays = 0;
 };
 
 inline const char* StatusLabel(AccStatus s) {
