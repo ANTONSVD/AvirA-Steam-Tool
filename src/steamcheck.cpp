@@ -58,6 +58,15 @@ static void BanLog(const std::string& msg) {
     util::AppendTextFile(g_logPath, std::string("[") + stamp + "] " + msg + "\n");
 }
 
+static std::string LogSafe(const std::string& s) {
+    std::string out = s;
+    for (size_t i = 0; i < out.size(); i++) {
+        unsigned char c = (unsigned char)out[i];
+        if (c < 0x20 || c > 0x7e) out[i] = '?';
+    }
+    return out;
+}
+
 static SteamThrottle g_thr;
 static std::atomic<bool> g_banCheck{true};
 
@@ -177,7 +186,10 @@ private:
                    const std::string& body, const std::string& cookie) {
         RawResp r;
         if (!m_h) return r;
-        g_thr.WaitTurn();
+        if (wcscmp(verb, L"POST") == 0)
+            g_thr.WaitLoginTurn();
+        else
+            g_thr.WaitTurn();
         HINTERNET hConn = WinHttpConnect(m_h, ToWide(host).c_str(),
                                          INTERNET_DEFAULT_HTTPS_PORT, 0);
         if (!hConn) return r;
@@ -296,7 +308,7 @@ static BanInfo FetchBanInfo(HttpSession& session, const std::string& steamid) {
         if (ap != std::string::npos) {
             size_t s = ap > 120 ? ap - 120 : 0;
             BanLog("ban: parse miss sid=" + steamid + " slice=>" +
-                   pr.body.substr(s, 280) + "<");
+                   LogSafe(pr.body.substr(s, 280)) + "<");
             break;
         }
         if (low.find("g_rgprofiledata") != std::string::npos ||
@@ -435,7 +447,7 @@ static std::string ModernAuthSteamId(HttpSession& session, const std::string& us
     }
     BanLog("modern: begin user=" + user + " http=" + std::to_string(br.status) +
            " len=" + std::to_string(br.body.size()) +
-           (br.body.size() <= 400 ? " body=" + br.body : ""));
+           (br.body.size() <= 400 ? " body=" + LogSafe(br.body) : ""));
     if (!br.ok || br.body.empty()) {
         err = "begin http=" + std::to_string(br.status);
         return "";
@@ -468,7 +480,7 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
     RawResp r1 = session.Post("steamcommunity.com", "/login/getrsakey/", b1, cookie);
     BanLog("login: rsakey user=" + user + " http=" + std::to_string(r1.status) +
            " len=" + std::to_string(r1.body.size()) +
-           (r1.body.size() <= 200 ? " body=" + r1.body : ""));
+           (r1.body.size() <= 200 ? " body=" + LogSafe(r1.body) : ""));
     if (!r1.setCookie.empty())
         cookie = MergeCookies(cookie, r1.setCookie);
     if (r1.status == 429) {
@@ -489,7 +501,8 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
     std::string exp = jsonmini::GetString(r1.body, "publickey_exp");
     std::string stamp = jsonmini::GetString(r1.body, "timestamp");
     if (mod.empty() || exp.empty() || stamp.empty()) {
-        BanLog("login: rsakey bad fields user=" + user + " body=" + r1.body);
+        BanLog("login: rsakey bad fields user=" + user + " body=" +
+               LogSafe(r1.body));
         return {AccStatus::Error, "bad key"};
     }
     std::string enc = RsaEncryptPassword(mod, exp, pass);
@@ -527,7 +540,7 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
            (sid.empty() ? "<none>" : sid) + " success=" + (success ? "1" : "0") +
            " guard=" + (guard ? "1" : "0") + " bancheck=" +
            (g_banCheck.load() ? "1" : "0") + " cookies=[" + ckNames + "]" +
-           (r2.body.size() <= 300 ? " body=" + r2.body : ""));
+           (r2.body.size() <= 300 ? " body=" + LogSafe(r2.body) : ""));
 
     if (r2.status == 429) {
         g_thr.ReportRateLimited(r2.retryAfterMs ? r2.retryAfterMs : 4500);
