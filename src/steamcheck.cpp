@@ -297,11 +297,16 @@ static BanInfo FetchBanInfo(HttpSession& session, const std::string& steamid) {
             size_t s = ap > 120 ? ap - 120 : 0;
             BanLog("ban: parse miss sid=" + steamid + " slice=>" +
                    pr.body.substr(s, 280) + "<");
-        } else {
-            BanLog("ban: no ban marker sid=" + steamid + " len=" +
-                   std::to_string(pr.body.size()));
+            break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        if (low.find("g_rgprofiledata") != std::string::npos ||
+            low.find("profile_header") != std::string::npos) {
+            BanLog("ban: clean, no ban sid=" + steamid);
+            break;
+        }
+        BanLog("ban: no ban marker sid=" + steamid + " len=" +
+               std::to_string(pr.body.size()));
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
     return bi;
 }
@@ -456,10 +461,6 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
 
     std::string cookie;
 
-    RawResp lh = session.Get("steamcommunity.com", "/login/home/?l=english", "");
-    if (!lh.setCookie.empty())
-        cookie = MergeCookies(cookie, lh.setCookie);
-
     long long ts = util::NowMs();
     std::string b1 = "username=" + util::UrlEncode(user) +
                      "&donotcache=" + std::to_string(ts);
@@ -507,12 +508,6 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
 
     RawResp r2 = session.Post("steamcommunity.com", "/login/dologin/", b2, cookie);
 
-    if (r2.status == 429) {
-        g_thr.ReportRateLimited(r2.retryAfterMs ? r2.retryAfterMs : 4500);
-        return {AccStatus::RateLimited, "rate 429"};
-    }
-    if (!r2.ok && r2.body.empty()) return {AccStatus::Error, "network"};
-
     if (!r2.setCookie.empty())
         cookie = MergeCookies(cookie, r2.setCookie);
 
@@ -533,24 +528,19 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
            " guard=" + (guard ? "1" : "0") + " bancheck=" +
            (g_banCheck.load() ? "1" : "0") + " cookies=[" + ckNames + "]" +
            (r2.body.size() <= 300 ? " body=" + r2.body : ""));
+
+    if (r2.status == 429) {
+        g_thr.ReportRateLimited(r2.retryAfterMs ? r2.retryAfterMs : 4500);
+        return {AccStatus::RateLimited, "rate 429"};
+    }
+    if (!r2.ok && r2.body.empty()) return {AccStatus::Error, "network"};
+
     BanInfo bi;
     if (g_banCheck.load()) {
         if (sid.empty() && success) {
             sid = ExtractSteamId(cookie);
             if (!sid.empty())
                 BanLog("login: sid from cookie name -> " + sid);
-        }
-        if (sid.empty() && success) {
-            RawResp mp = session.Get("steamcommunity.com", "/my?l=english", cookie);
-            BanLog("login: /my fallback http=" + std::to_string(mp.status) +
-                   " len=" + std::to_string(mp.body.size()));
-            if (mp.ok && !mp.body.empty()) {
-                std::string sid2 = ExtractSteamId(mp.body);
-                if (!sid2.empty()) {
-                    sid = sid2;
-                    BanLog("login: sid fallback /my -> " + sid);
-                }
-            }
         }
         if (sid.empty() && success) {
             std::string err;

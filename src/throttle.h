@@ -6,7 +6,7 @@
 
 class SteamThrottle {
 public:
-    SteamThrottle(int baseMs = 250, int maxMs = 5000)
+    SteamThrottle(int baseMs = 180, int maxMs = 5000)
         : m_nextAllowed(0) {
         if (baseMs < 50) baseMs = 50;
         if (maxMs < baseMs) maxMs = baseMs;
@@ -52,10 +52,10 @@ public:
 
     void ReportSuccess() {
         int ok = m_consecOk.fetch_add(1) + 1;
-        if (ok >= 6) {
+        if (ok >= 4) {
             int base = m_base.load();
             int cur = m_interval.load();
-            if (cur > base) m_interval.store(cur - 100 < base ? base : cur - 100);
+            if (cur > base) m_interval.store(cur - 150 < base ? base : cur - 150);
             m_consecOk.store(2);
         }
     }
