@@ -14,6 +14,7 @@
 #include <thread>
 #include <random>
 #include <map>
+#include <ctime>
 
 #pragma comment(lib, "winhttp.lib")
 
@@ -33,6 +34,30 @@ static std::wstring ToWide(const std::string& s) {
     return w;
 }
 
+static std::string g_logPath;
+static std::mutex g_logMtx;
+
+static void BanLog(const std::string& msg) {
+    std::lock_guard<std::mutex> l(g_logMtx);
+    if (g_logPath.empty()) return;
+    HANDLE h = CreateFileA(g_logPath.c_str(), GENERIC_READ,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool oversize = false;
+    if (h != INVALID_HANDLE_VALUE) {
+        LARGE_INTEGER sz;
+        oversize = GetFileSizeEx(h, &sz) && sz.QuadPart > 512 * 1024;
+        CloseHandle(h);
+    }
+    if (oversize) DeleteFileA(g_logPath.c_str());
+    time_t t = time(nullptr);
+    struct tm tmv;
+    localtime_s(&tmv, &t);
+    char stamp[64];
+    strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tmv);
+    util::AppendTextFile(g_logPath, std::string("[") + stamp + "] " + msg + "\n");
+}
+
 static SteamThrottle g_thr;
 static std::atomic<bool> g_banCheck{true};
 
@@ -40,6 +65,10 @@ namespace steamcheck {
 int CurrentMinInterval() { return g_thr.CurrentInterval(); }
 void ReportMinInterval(int ms) { g_thr.SetBase(ms); }
 void SetBanCheck(bool on) { g_banCheck.store(on); }
+void SetLogPath(const std::string& p) {
+    std::lock_guard<std::mutex> l(g_logMtx);
+    g_logPath = p;
+}
 }
 
 struct RawResp {
@@ -230,16 +259,49 @@ private:
 
 static BanInfo FetchBanInfo(HttpSession& session, const std::string& steamid) {
     BanInfo bi;
-    if (steamid.empty() || steamid.size() < 10) return bi;
-    for (int attempt = 0; attempt < 2 && !bi.banned; attempt++) {
+    if (steamid.empty() || steamid.size() < 10) {
+        BanLog("ban: skip, empty/short steamid");
+        return bi;
+    }
+    for (int attempt = 0; attempt < 3 && !bi.banned; attempt++) {
         RawResp pr = session.Get("steamcommunity.com",
                                  "/profiles/" + steamid + "?l=english", "");
-        if (!pr.ok || pr.body.empty()) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        if (pr.status == 429) {
+            g_thr.ReportRateLimited(pr.retryAfterMs ? pr.retryAfterMs : 3000);
+            BanLog("ban: profile 429 sid=" + steamid +
+                   " retryAfter=" + std::to_string(pr.retryAfterMs));
+            std::this_thread::sleep_for(std::chrono::milliseconds(900));
             continue;
         }
+        if (!pr.ok || pr.body.empty()) {
+            BanLog("ban: profile http=" + std::to_string(pr.status) + " len=" +
+                   std::to_string(pr.body.size()) + " sid=" + steamid +
+                   " attempt=" + std::to_string(attempt));
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+        std::string low = util::ToLower(pr.body);
+        if (low.find("profile could not be found") != std::string::npos ||
+            low.find("profile_not_found") != std::string::npos) {
+            BanLog("ban: profile not found sid=" + steamid);
+            break;
+        }
         bi = ParseBanHtml(pr.body);
-        if (bi.banned) break;
+        if (bi.banned) {
+            BanLog("ban: HIT sid=" + steamid + " text=" + bi.text + " days=" +
+                   std::to_string(bi.days));
+            break;
+        }
+        size_t ap = low.find("ban on record");
+        if (ap != std::string::npos) {
+            size_t s = ap > 120 ? ap - 120 : 0;
+            BanLog("ban: parse miss sid=" + steamid + " slice=>" +
+                   pr.body.substr(s, 280) + "<");
+        } else {
+            BanLog("ban: no ban marker sid=" + steamid + " len=" +
+                   std::to_string(pr.body.size()));
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
     }
     return bi;
 }
@@ -251,7 +313,7 @@ static BanInfo FetchBanByName(HttpSession& session, const std::string& name) {
                              "/id/" + name + "?l=english", "");
     if (pr.ok && !pr.body.empty())
         bi = ParseBanHtml(pr.body);
-    if (!bi.banned && pr.status >= 300 && pr.status < 400) {
+    if (!bi.banned) {
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
         RawResp xml = session.Get("steamcommunity.com",
                                   "/id/" + name + "/?xml=1", "");
@@ -263,10 +325,14 @@ static BanInfo FetchBanByName(HttpSession& session, const std::string& name) {
                 size_t e = sx.find('<', sp);
                 if (e != std::string::npos && e - sp == 17) {
                     std::string sid = xml.body.substr(sp, 17);
+                    BanLog("ban: name '" + name + "' resolved sid=" + sid);
                     bi = FetchBanInfo(session, sid);
                 }
             }
         }
+        if (!bi.banned)
+            BanLog("ban: name '" + name + "' http=" + std::to_string(pr.status) +
+                   " xml=" + std::to_string(xml.status) + " -> no ban");
     }
     return bi;
 }
@@ -378,9 +444,32 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
     if (!r2.ok && r2.body.empty()) return {AccStatus::Error, "network"};
 
     std::string sid = ExtractSteamId(r2.body);
+    bool success = jsonmini::GetBool(r2.body, "success");
+    bool guard = jsonmini::GetBool(r2.body, "emailauth_needed") ||
+                 jsonmini::GetBool(r2.body, "requires_twofactor");
+    BanLog("login user=" + user + " http=" + std::to_string(r2.status) +
+           " len=" + std::to_string(r2.body.size()) + " sid=" +
+           (sid.empty() ? "<none>" : sid) + " success=" + (success ? "1" : "0") +
+           " guard=" + (guard ? "1" : "0") + " bancheck=" +
+           (g_banCheck.load() ? "1" : "0"));
     BanInfo bi;
-    if (!sid.empty() && g_banCheck.load())
-        bi = FetchBanInfo(session, sid);
+    if (g_banCheck.load()) {
+        if (sid.empty() && success) {
+            RawResp mp = session.Get("steamcommunity.com", "/my?l=english", cookie);
+            if (mp.ok && !mp.body.empty()) {
+                std::string sid2 = ExtractSteamId(mp.body);
+                if (!sid2.empty()) {
+                    sid = sid2;
+                    BanLog("login: sid fallback /my -> " + sid);
+                }
+            }
+        }
+        if (!sid.empty())
+            bi = FetchBanInfo(session, sid);
+        else
+            BanLog("login: no sid after login/fallback, ban check skipped user=" +
+                   user);
+    }
 
     if (jsonmini::GetBool(r2.body, "success")) {
         g_thr.ReportSuccess();

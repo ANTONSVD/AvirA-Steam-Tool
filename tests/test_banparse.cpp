@@ -75,6 +75,28 @@ int main() {
         CHECK(bi.text == "VAC BAN");
         CHECK(bi.days == 0);
     }
+    {
+        std::string live =
+            "<div class=\"profile_ban_status\">\n"
+            "\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t\t<div class=\"profile_ban\">\n"
+            "\t\t\t\t\t1 game ban on record\t\t\t\t\t"
+            "<span class=\"profile_ban_info\">| <a class=\"whiteLink\" "
+            "href=\"https://support.steampowered.com/kb_article.php?"
+            "ref=6899-IOSK-9514&l=english\" target=\"_blank\" rel=\"\" >"
+            "Info</a></span>\n"
+            "\t\t\t\t</div>\n"
+            "\t\t\t\t\t\t3225 day(s) since last ban"
+            "\t\t\t\t\t\t\t\t</div>\n"
+            "\t\t\t</div>\n"
+            "\t\t</div>\n"
+            "\t</div>\n"
+            "</div>\n"
+            "\n\t\t</div>\t<!-- responsive_page_legacy_content -->";
+        BanInfo bi = ParseBanHtml(live);
+        CHECK(bi.banned);
+        CHECK(bi.text == "GAME BAN");
+        CHECK(bi.days == 3225);
+    }
 
     if (g_fail == 0) printf("banparse: ALL OK\n");
     return g_fail == 0 ? 0 : 1;

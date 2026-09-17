@@ -384,6 +384,7 @@ void Init() {
     }
     LoadSettings();
     steamcheck::SetBanCheck(S.checkBans);
+    steamcheck::SetLogPath(S.dataDir + "\\ban_debug.log");
     S.store.Load(S.dataDir + "\\accounts.txt");
 
     g_icPlay = Ic(0xE768);

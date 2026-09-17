@@ -18,4 +18,5 @@ namespace steamcheck {
 int CurrentMinInterval();
 void ReportMinInterval(int ms);
 void SetBanCheck(bool on);
+void SetLogPath(const std::string& path);
 }
