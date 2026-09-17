@@ -309,6 +309,7 @@ static void RefreshBansAsync() {
         }
         int found = 0;
         int updated = 0;
+        int skipped = 0;
         for (auto& a : snapshot) {
             if (a.status != AccStatus::Valid && a.status != AccStatus::Guard) continue;
             BanResult br;
@@ -320,6 +321,18 @@ static void RefreshBansAsync() {
                     S.store.SetSteamId(a.user, sid);
                     updated++;
                 }
+                if (!co.ban.empty()) {
+                    S.store.SetBan(a.user, co.ban, co.banDays);
+                    found++;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                    continue;
+                }
+                if (co.status != AccStatus::Valid &&
+                    co.status != AccStatus::Guard) {
+                    skipped++;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                    continue;
+                }
             }
             if (!sid.empty())
                 br = FetchBanBySteamId(sid);
@@ -329,12 +342,13 @@ static void RefreshBansAsync() {
                 S.store.SetBan(a.user, br.ban, br.days);
                 found++;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(400));
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
         }
         S.store.Save(S.dataDir + "\\accounts.txt");
         PushToast(found > 0 ? 2 : 0,
                   "Баны обновлены · найдено: " + std::to_string(found) +
-                      " · sid: " + std::to_string(updated));
+                      " · sid: " + std::to_string(updated) +
+                      " · пропуск: " + std::to_string(skipped));
         g_banScanBusy = false;
     }).detach();
 }
