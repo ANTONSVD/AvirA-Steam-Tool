@@ -359,31 +359,33 @@ BanResult FetchBanByAccountName(const std::string& name) {
     return r;
 }
 
+static void ParseCookieJar(const std::string& c,
+                           std::map<std::string, std::string>& jar) {
+    size_t pos = 0;
+    while (pos < c.size()) {
+        size_t semi = c.find(';', pos);
+        std::string pair = semi == std::string::npos ? c.substr(pos)
+                                                     : c.substr(pos, semi - pos);
+        size_t a = 0;
+        while (a < pair.size() && (pair[a] == ' ' || pair[a] == '\t')) a++;
+        size_t eq = pair.find('=', a);
+        if (eq != std::string::npos) {
+            std::string k = pair.substr(a, eq - a);
+            std::string v = pair.substr(eq + 1);
+            while (!k.empty() && (k.back() == ' ' || k.back() == '\t')) k.pop_back();
+            if (!k.empty()) jar[k] = v;
+        }
+        if (semi == std::string::npos) break;
+        pos = semi + 1;
+    }
+}
+
 static std::string MergeCookies(const std::string& oldC, const std::string& newC) {
     if (oldC.empty()) return newC;
     if (newC.empty()) return oldC;
     std::map<std::string, std::string> jar;
-    auto add = [&jar](const std::string& c) {
-        if (c.empty()) return;
-        std::string rest = c;
-        size_t pos = 0;
-        while (pos < rest.size()) {
-            size_t semi = rest.find(';', pos);
-            std::string pair = semi == std::string::npos ? rest.substr(pos) : rest.substr(pos, semi - pos);
-            size_t a = 0;
-            while (a < pair.size() && (pair[a] == ' ' || pair[a] == '\t')) a++;
-            size_t eq = pair.find('=', a);
-            if (eq != std::string::npos) {
-                std::string k = pair.substr(a, eq - a);
-                std::string v = pair.substr(eq + 1);
-                jar[k] = v;
-            }
-            if (semi == std::string::npos) break;
-            pos = semi + 1;
-        }
-    };
-    add(oldC);
-    add(newC);
+    ParseCookieJar(oldC, jar);
+    ParseCookieJar(newC, jar);
     std::string out;
     for (auto& kv : jar) {
         if (!out.empty()) out += "; ";
@@ -404,6 +406,9 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
                      "&donotcache=" + std::to_string(ts);
 
     RawResp r1 = session.Post("steamcommunity.com", "/login/getrsakey/", b1, cookie);
+    BanLog("login: rsakey user=" + user + " http=" + std::to_string(r1.status) +
+           " len=" + std::to_string(r1.body.size()) +
+           (r1.body.size() <= 200 ? " body=" + r1.body : ""));
     if (!r1.setCookie.empty())
         cookie = MergeCookies(cookie, r1.setCookie);
     if (r1.status == 429) {
@@ -443,19 +448,37 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
     }
     if (!r2.ok && r2.body.empty()) return {AccStatus::Error, "network"};
 
+    if (!r2.setCookie.empty())
+        cookie = MergeCookies(cookie, r2.setCookie);
+
     std::string sid = ExtractSteamId(r2.body);
     bool success = jsonmini::GetBool(r2.body, "success");
     bool guard = jsonmini::GetBool(r2.body, "emailauth_needed") ||
                  jsonmini::GetBool(r2.body, "requires_twofactor");
+    std::string ckNames;
+    {
+        std::map<std::string, std::string> jar;
+        ParseCookieJar(cookie, jar);
+        for (auto& kv : jar)
+            ckNames += (ckNames.empty() ? "" : ",") + kv.first;
+    }
     BanLog("login user=" + user + " http=" + std::to_string(r2.status) +
            " len=" + std::to_string(r2.body.size()) + " sid=" +
            (sid.empty() ? "<none>" : sid) + " success=" + (success ? "1" : "0") +
            " guard=" + (guard ? "1" : "0") + " bancheck=" +
-           (g_banCheck.load() ? "1" : "0"));
+           (g_banCheck.load() ? "1" : "0") + " cookies=[" + ckNames + "]" +
+           (r2.body.size() <= 300 ? " body=" + r2.body : ""));
     BanInfo bi;
     if (g_banCheck.load()) {
         if (sid.empty() && success) {
+            sid = ExtractSteamId(cookie);
+            if (!sid.empty())
+                BanLog("login: sid from cookie name -> " + sid);
+        }
+        if (sid.empty() && success) {
             RawResp mp = session.Get("steamcommunity.com", "/my?l=english", cookie);
+            BanLog("login: /my fallback http=" + std::to_string(mp.status) +
+                   " len=" + std::to_string(mp.body.size()));
             if (mp.ok && !mp.body.empty()) {
                 std::string sid2 = ExtractSteamId(mp.body);
                 if (!sid2.empty()) {
