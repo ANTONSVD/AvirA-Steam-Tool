@@ -1,5 +1,6 @@
 #include "accounts.h"
 #include "util.h"
+#include "steamtoken.h"
 
 static std::string StatusTag(AccStatus s) {
     switch (s) {
@@ -41,6 +42,8 @@ void AccountStore::Load(const std::string& path) {
                                         : l.substr(cur, tn - cur);
                 if (field.rfind("sid:", 0) == 0) {
                     a.steamid = field.substr(4);
+                } else if (field.rfind("tok:", 0) == 0) {
+                    a.token = field.substr(4);
                 } else if (a.ban.empty()) {
                     a.ban = field;
                 } else {
@@ -59,6 +62,7 @@ void AccountStore::Load(const std::string& path) {
             if (e.user == a.user) {
                 e.status = a.status;
                 e.pass = a.pass;
+                e.token = a.token;
                 e.ban = a.ban;
                 e.banDays = a.banDays;
                 e.steamid = a.steamid;
@@ -70,11 +74,12 @@ void AccountStore::Load(const std::string& path) {
 }
 
 void AccountStore::Save(const std::string& path) {
-    std::string out = "# user\tstatus\tpassword[...tab...ban[...tab...days][...tab...sid:steamid]\n";
+    std::string out = "# user\tstatus\tpassword[...tab...ban[...tab...days][...tab...sid:steamid][...tab...tok:token]\n";
     for (auto& a : m_items) {
         out += a.user + "\t" + StatusTag(a.status) + "\t" + a.pass;
         if (!a.ban.empty()) out += "\t" + a.ban + "\t" + std::to_string(a.banDays);
         if (!a.steamid.empty()) out += "\tsid:" + a.steamid;
+        if (!a.token.empty()) out += "\ttok:" + a.token;
         out += "\n";
     }
     util::WriteTextFile(path, out);
@@ -86,6 +91,7 @@ bool AccountStore::AddOrUpdate(const Cred& cred, AccStatus st) {
             if (st == AccStatus::Valid || st == AccStatus::Guard) {
                 a.status = st;
                 a.pass = cred.pass;
+                a.token = cred.token;
                 return true;
             }
             return false;
@@ -95,6 +101,7 @@ bool AccountStore::AddOrUpdate(const Cred& cred, AccStatus st) {
     Account a;
     a.user = cred.user;
     a.pass = cred.pass;
+    a.token = cred.token;
     a.status = st;
     a.addedAt = util::NowMs() / 1000;
     m_items.push_back(a);
@@ -155,14 +162,43 @@ std::vector<Cred> ParseCombos(const std::string& text) {
     for (auto& line : util::SplitLines(text)) {
         std::string l = util::Trim(line);
         if (l.empty() || l[0] == '#') continue;
+        Cred c;
+        size_t sep = l.find("----");
+        if (sep != std::string::npos && sep > 0) {
+            std::string right = util::Trim(l.substr(sep + 4));
+            if (steamtoken::LooksLikeJwt(right)) {
+                c.user = util::Trim(l.substr(0, sep));
+                c.token = right;
+                if (c.user.empty()) continue;
+                bool dup = false;
+                for (auto& e : out)
+                    if (e.user == c.user) { dup = true; break; }
+                if (!dup) out.push_back(c);
+                continue;
+            }
+        }
+        if (steamtoken::LooksLikeJwt(l)) {
+            steamtoken::JwtClaims jc = steamtoken::ParseJwt(l);
+            if (!jc.ok) continue;
+            c.user = jc.sub;
+            c.token = l;
+            bool dup = false;
+            for (auto& e : out)
+                if (e.user == c.user) { dup = true; break; }
+            if (!dup) out.push_back(c);
+            continue;
+        }
         size_t p1 = l.find(':');
         if (p1 == std::string::npos || p1 == 0) continue;
         size_t p2 = l.find(':', p1 + 1);
-        Cred c;
         c.user = util::Trim(l.substr(0, p1));
         c.pass = p2 == std::string::npos ? util::Trim(l.substr(p1 + 1))
                                          : util::Trim(l.substr(p1 + 1, p2 - p1 - 1));
         if (c.user.empty() || c.pass.empty()) continue;
+        if (steamtoken::LooksLikeJwt(c.pass)) {
+            c.token = c.pass;
+            c.pass.clear();
+        }
         bool dup = false;
         for (auto& e : out) if (e.user == c.user) { dup = true; break; }
         if (!dup) out.push_back(c);
@@ -174,7 +210,7 @@ void ExportHits(const std::string& path, const std::vector<Account>& items) {
     std::string out;
     for (auto& a : items) {
         if (a.status == AccStatus::Valid || a.status == AccStatus::Guard)
-            out += a.user + ":" + a.pass + "\n";
+            out += a.user + ":" + (!a.token.empty() ? a.token : a.pass) + "\n";
     }
     util::WriteTextFile(path, out);
 }

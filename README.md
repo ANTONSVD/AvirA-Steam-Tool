@@ -6,6 +6,13 @@
 ## Возможности
 
 - **Проверка** списков `login:password` (и `login:pass:mail:mailpass` — берутся первые два поля) через `steamcommunity.com/login/getrsakey` → RSA PKCS1 v1.5 → `dologin`
+- **Refresh-токены Steam (JWT)** — в то же поле комбо, авто-определение формата:
+  ```
+  login:eyJhbGciOiJFZERTQSJ9...
+  login----eyJhbGciOiJFZERTQSJ9...
+  eyJhbGciOiJFZERTQSJ9...   # голый токен, логин = steamid из sub
+  ```
+  Проверка: офлайн-разбор JWT (`iss==steam`, `sub`, `exp`, `aud` с `client`) + live-запрос `IAuthenticationService/GenerateAccessTokenForApp` (успех → VALID, иначе VALID с пометкой `offline` по валидному JWT). Битый/просроченный → BAD. Бан тянется по `sub` из токена
 - Классификация: `VALID` / `STEAMGUARD (2FA)` / `BAD` / `ERR` / `RATE`
 - **Многопоток** (1–64) с ретраями, джиттером и обработкой 429/captcha/rate-limit
 - **Глобальный планировщик запросов** (`src/throttle.h`) — все потоки берут слоты по мьютексу, залпов нет; интервал адаптивный 250мс→5с, `Retry-After` уважается
@@ -61,11 +68,11 @@ bin\x64\Release\AvirASteamTool.exe
      ```
    - плейсхолдер подсказывает вид
    - чип справа показывает сколько распарсилось
-3. Подтяни `proxy.txt` в **Настройки → Загрузить proxy.txt** (каждому ретраю — рандомный прокси). Без прокси — прямой коннект
-4. Выставь **Потоки** (слайдер) — 8 по умолчанию, 12–16 норм без прокси, с ротацией можно больше
-5. `Запустить проверку` → прогресс-бар, счётчики VALID/2FA/BAD/ERR, лог справа (чистится иконкой 🗑)
-6. Валидные сразу появляются в **Аккаунты** и пишутся на диск
-7. В **Аккаунты** — поиск, бейдж `VALID`/`2FA`, `Войти`, копирование логина/пароля, удаление
+ 3. Подтяни `proxy.txt` в **Настройки → Загрузить proxy.txt** (каждому ретраю — рандомный прокси). Без прокси — прямой коннект
+ 4. Выставь **Потоки** (слайдер) — 8 по умолчанию, 12–16 норм без прокси, с ротацией можно больше
+ 5. `Запустить проверку` → прогресс-бар, счётчики VALID/2FA/BAD/ERR, лог справа (чистится иконкой 🗑)
+ 6. Валидные сразу появляются в **Аккаунты** и пишутся на диск
+ 7. В **Аккаунты** — поиск, бейдж `VALID`/`2FA` (+ `TOKEN` у токенов), `Войти`, копирование логина/пароля/токена, удаление
 
 ## Файлы данных
 
@@ -73,8 +80,8 @@ bin\x64\Release\AvirASteamTool.exe
 
 ```
 data\
-  accounts.txt  # user<TAB>valid/guard<TAB>password
-  hits.txt      # user:pass (экспорт)
+  accounts.txt  # user<TAB>valid/guard<TAB>password[...TAB...ban...TAB...sid:steamid...TAB...tok:token]
+  hits.txt      # user:pass или user:token (экспорт)
   proxies.txt   # последняя загрузка прокси
   settings.ini  # threads/preset/sound/mask/autoexport
 ```
@@ -90,6 +97,17 @@ data\
 - иначе `KillSteam()` (Toolhelp32 → `TerminateProcess`), `RegDeleteValue(AutoLoginUser)`, `CreateProcess("\"...\steam.exe\" -login \"user\" \"pass\"")`
 
 Steam должен быть установлен. Логин с 2FA потребует код Guard в клиенте.
+
+## Вход по refresh-токену
+
+`steamctl.cpp:LoginByToken` (как `steam_login.py`):
+- JWT парсится (`sub` = steamid), имя аккаунта = lowercase логина
+- `crc32(name)` → hex без ведущих нулей + `"1"` = ключ `ConnectCache`
+- Токен шифруется DPAPI (`CryptProtectData`, entropy = имя, description `BObfuscateBuffer`) → hex
+- Убиваются все процессы Steam (`steam`, `steamservice`, `steamwebhelper`, `steamerrorreporter`, `streaming_client`)
+- Патчатся `%LOCALAPPDATA%\Steam\local.vdf` (`ConnectCache`), `<Steam>\config\config.vdf` (`Accounts` + `AlwaysShowUserChooser=0`), `<Steam>\config\loginusers.vdf` (`MostRecent`/`RememberPassword`/`AllowAutoLogin`/`Timestamp`)
+- Реестр `HKCU\Software\Valve\Steam`: `AutoLoginUser` + `RememberPassword=1`, запуск `steam.exe` без аргументов
+- Ошибки: `BadToken` → тост «Битый токен», `NoWrite` → «Не удалось записать данные Steam»
 
 ## Тонкая настройка
 

@@ -96,6 +96,7 @@
     <ClInclude Include="src\rsa.h" />
     <ClInclude Include="src\steamcheck.h" />
     <ClInclude Include="src\accounts.h" />
+    <ClInclude Include="src\steamtoken.h" />
     <ClInclude Include="src\steamctl.h" />
     <ClInclude Include="src\checker.h" />
     <ClInclude Include="src\throttle.h" />

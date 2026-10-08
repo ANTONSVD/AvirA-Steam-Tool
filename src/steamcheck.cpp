@@ -4,6 +4,7 @@
 #include "util.h"
 #include "throttle.h"
 #include "banparse.h"
+#include "steamtoken.h"
 #include <windows.h>
 #include <winhttp.h>
 #include <string>
@@ -83,6 +84,7 @@ void SetLogPath(const std::string& p) {
 struct RawResp {
     bool ok = false;
     int status = 0;
+    int eresult = 0;
     std::string body;
     int retryAfterMs = 0;
     std::string setCookie;
@@ -222,6 +224,7 @@ private:
                                 WINHTTP_NO_HEADER_INDEX);
             r.status = (int)st;
             r.retryAfterMs = ExtractRetryAfter(hReq);
+            r.eresult = ExtractEResult(hReq);
             r.setCookie = ExtractCookies(hReq);
             DWORD avail = 0;
             do {
@@ -242,17 +245,21 @@ private:
     }
 
 private:
-    static int ExtractRetryAfter(HINTERNET hReq) {
+    static std::wstring RawHeaders(HINTERNET hReq) {
         DWORD sz = 0;
         WinHttpQueryHeaders(hReq, WINHTTP_QUERY_RAW_HEADERS_CRLF,
                             WINHTTP_HEADER_NAME_BY_INDEX, NULL, &sz,
                             WINHTTP_NO_HEADER_INDEX);
-        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || sz == 0) return 0;
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || sz == 0) return L"";
         std::vector<wchar_t> buf(sz / sizeof(wchar_t) + 4);
         if (!WinHttpQueryHeaders(hReq, WINHTTP_QUERY_RAW_HEADERS_CRLF,
                                  WINHTTP_HEADER_NAME_BY_INDEX, buf.data(), &sz,
-                                 WINHTTP_NO_HEADER_INDEX)) return 0;
-        std::wstring low(buf.data());
+                                 WINHTTP_NO_HEADER_INDEX)) return L"";
+        return std::wstring(buf.data());
+    }
+
+    static int ExtractRetryAfter(HINTERNET hReq) {
+        std::wstring low = RawHeaders(hReq);
         for (auto& c : low) c = towlower(c);
         const wchar_t* p = wcsstr(low.c_str(), L"retry-after:");
         if (!p) return 0;
@@ -261,6 +268,19 @@ private:
         wchar_t* end = nullptr;
         long v = wcstol(p, &end, 10);
         if (v > 0 && v < 300) return (int)(v * 1000);
+        return 0;
+    }
+
+    static int ExtractEResult(HINTERNET hReq) {
+        std::wstring low = RawHeaders(hReq);
+        for (auto& c : low) c = towlower(c);
+        const wchar_t* p = wcsstr(low.c_str(), L"x-eresult:");
+        if (!p) return 0;
+        p += 10;
+        while (*p == L' ' || *p == L'\t') p++;
+        wchar_t* end = nullptr;
+        long v = wcstol(p, &end, 10);
+        if (v > 0 && v < 1000) return (int)v;
         return 0;
     }
 
@@ -601,4 +621,39 @@ CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
         return {AccStatus::Error, "empty"};
     }
     return {AccStatus::Invalid, msg};
+}
+
+CheckOutcome CheckSteamToken(const std::string& token, const std::string& proxy) {
+    steamtoken::JwtClaims jc = steamtoken::ParseJwt(token);
+    if (!jc.ok) return {AccStatus::Invalid, "bad token"};
+    if (jc.expired) return {AccStatus::Invalid, "expired"};
+
+    HttpSession session;
+    if (!session.Ensure(proxy)) return {AccStatus::Error, "no session"};
+
+    std::string b = "refresh_token=" + util::UrlEncode(token) +
+                    "&steamid=" + jc.sub;
+    RawResp r = session.Post("api.steampowered.com",
+                             "/IAuthenticationService/GenerateAccessTokenForApp/v1",
+                             b, "");
+    if (r.status == 429) {
+        g_thr.ReportRateLimited(r.retryAfterMs ? r.retryAfterMs : 4500);
+        return {AccStatus::RateLimited, "rate 429"};
+    }
+    if (r.status == 0 && r.body.empty()) return {AccStatus::Error, "network"};
+
+    BanLog("token: sid=" + jc.sub + " http=" + std::to_string(r.status) +
+           " eresult=" + std::to_string(r.eresult) +
+           " len=" + std::to_string(r.body.size()) +
+           (r.body.size() <= 200 ? " body=" + LogSafe(r.body) : ""));
+
+    std::string at = jsonmini::GetString(r.body, "access_token");
+    bool live = !at.empty() || r.eresult == 1;
+    if (live) g_thr.ReportSuccess();
+
+    BanInfo bi;
+    if (g_banCheck.load()) bi = FetchBanInfo(session, jc.sub);
+
+    if (live) return {AccStatus::Valid, "", jc.sub, bi.text, bi.days};
+    return {AccStatus::Valid, "offline", jc.sub, bi.text, bi.days};
 }

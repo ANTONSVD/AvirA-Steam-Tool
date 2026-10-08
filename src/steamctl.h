@@ -11,7 +11,10 @@ enum class SteamLoginResult {
     Restarted,
     AlreadyActive,
     NoSteam,
-    Failed
+    Failed,
+    BadToken,
+    NoWrite
 };
 
 SteamLoginResult LoginToAccount(const std::string& user, const std::string& pass);
+SteamLoginResult LoginByToken(const std::string& user, const std::string& token);

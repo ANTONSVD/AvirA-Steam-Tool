@@ -102,7 +102,8 @@ private:
                 std::string proxy;
                 if (!m_proxies.empty())
                     proxy = m_proxies[rng() % m_proxies.size()];
-                oc = CheckSteamAccount(cred.user, cred.pass, proxy);
+                oc = !cred.token.empty() ? CheckSteamToken(cred.token, proxy)
+                                         : CheckSteamAccount(cred.user, cred.pass, proxy);
                 if (oc.status != AccStatus::Error && oc.status != AccStatus::RateLimited)
                     break;
                 static const int rlWaits[] = {1500, 3500, 7000, 12000};

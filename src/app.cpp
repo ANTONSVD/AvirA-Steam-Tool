@@ -3,6 +3,7 @@
 #include "checker.h"
 #include "accounts.h"
 #include "steamctl.h"
+#include "steamtoken.h"
 #include "util.h"
 #include "imgui_internal.h"
 #include "imgui_stdlib.h"
@@ -206,7 +207,7 @@ static void StartChecker() {
     if (S.checker.Running()) return;
     auto combos = ParseCombos(S.comboText);
     if (combos.empty()) {
-        PushToast(2, "Добавьте аккаунты: login:password");
+        PushToast(2, "Добавьте аккаунты: login:password или refresh-токен");
         return;
     }
     if (S.skipKnown) {
@@ -265,7 +266,9 @@ static void DrainEvents() {
             S.store.Save(S.dataDir + "\\accounts.txt");
             if (S.autoExport)
                 util::AppendTextFile(S.dataDir + "\\hits.txt",
-                                     e.cred.user + ":" + e.cred.pass);
+                                     e.cred.user + ":" +
+                                         (!e.cred.token.empty() ? e.cred.token
+                                                                : e.cred.pass));
         }
         if (e.oc.status == AccStatus::Valid) {
             if (S.soundHit) MessageBeep(MB_ICONASTERISK);
@@ -314,6 +317,14 @@ static void RefreshBansAsync() {
             if (a.status != AccStatus::Valid && a.status != AccStatus::Guard) continue;
             BanResult br;
             std::string sid = a.steamid;
+            if (sid.empty() && !a.token.empty()) {
+                steamtoken::JwtClaims jc = steamtoken::ParseJwt(a.token);
+                if (jc.ok) {
+                    sid = jc.sub;
+                    S.store.SetSteamId(a.user, sid);
+                    updated++;
+                }
+            }
             if (sid.empty()) {
                 CheckOutcome co = CheckSteamAccount(a.user, a.pass, "");
                 if (co.steamid.size() >= 10) {
@@ -367,6 +378,33 @@ static void DoLoginAsync(std::string user, std::string pass) {
                 PushToast(0, "Этот аккаунт уже активен"); break;
             case SteamLoginResult::NoSteam:
                 PushToast(3, "Steam не найден в системе"); break;
+            default:
+                PushToast(3, "Не удалось запустить Steam"); break;
+        }
+        RefreshSteamInfo();
+        S.loggingUser.clear();
+        S.loginBusy = false;
+    }).detach();
+}
+
+static void DoLoginTokenAsync(std::string user, std::string token) {
+    if (S.loginBusy.exchange(true)) return;
+    S.loggingUser = user;
+    std::thread([user, token]() {
+        SteamLoginResult r = LoginByToken(user, token);
+        switch (r) {
+            case SteamLoginResult::Started:
+                PushToast(1, "Выполняется вход по токену · " + user); break;
+            case SteamLoginResult::Restarted:
+                PushToast(1, "Steam перезапущен на " + user); break;
+            case SteamLoginResult::AlreadyActive:
+                PushToast(0, "Этот аккаунт уже активен"); break;
+            case SteamLoginResult::NoSteam:
+                PushToast(3, "Steam не найден в системе"); break;
+            case SteamLoginResult::BadToken:
+                PushToast(3, "Битый токен · " + user); break;
+            case SteamLoginResult::NoWrite:
+                PushToast(3, "Не удалось записать данные Steam"); break;
             default:
                 PushToast(3, "Не удалось запустить Steam"); break;
         }
@@ -747,7 +785,7 @@ static void RenderCheckerPage(float w, float h) {
         if (S.comboText.empty()) {
             dl->AddText(g_fontMono, 16.f, ImVec2(ipos.x + 8, ipos.y + 8),
                         ImGui::GetColorU32(ImVec4(p.dim.x, p.dim.y, p.dim.z, 0.45f)),
-                        "login:password\n\nexample:\nsomeuser123:MyStr0ngPass!\nanother_acc@hotmail.com:qwerty456\nuser:pass:mail:mailpass");
+                        "login:password\n\nrefresh-token:\nlogin:eyJhbGciOiJFZERTQSJ9...\nlogin----eyJhbGciOiJFZERTQSJ9...\neyJhbGciOiJFZERTQSJ9...");
         }
 
         ImGui::SetCursorPos(ImVec2(16, lh + 12));
@@ -1007,10 +1045,15 @@ static void RenderAccountsPage(float w, float h) {
                         ImGui::GetColorU32(p.text), a.user.c_str());
             ImGui::PopFont();
 
+            bool hasToken = !a.token.empty();
             std::string masked;
             if (S.maskPass) {
-                size_t n = std::min(a.pass.size(), (size_t)12);
+                size_t n = std::min(hasToken ? a.token.size() : a.pass.size(),
+                                    (size_t)12);
                 for (size_t k = 0; k < n; k++) masked += "\xE2\x80\xA2";
+            } else if (hasToken) {
+                masked = a.token.substr(0, std::min(a.token.size(), (size_t)26));
+                if (a.token.size() > 26) masked += "...";
             } else {
                 masked = a.pass;
             }
@@ -1019,6 +1062,11 @@ static void RenderAccountsPage(float w, float h) {
                         masked.c_str());
 
             float badgeX = org.x + rw - 320;
+            if (hasToken) {
+                ImGui::SetCursorScreenPos(ImVec2(badgeX, org.y + 16));
+                theme::Badge("TOKEN", ImGui::GetColorU32(theme::AccentGlow(0.95f)));
+                badgeX -= 78;
+            }
             if (a.status == AccStatus::Guard) {
                 ImGui::SetCursorScreenPos(ImVec2(badgeX, org.y + 16));
                 theme::Badge("2FA", ImGui::GetColorU32(p.guard));
@@ -1047,9 +1095,13 @@ static void RenderAccountsPage(float w, float h) {
                 ImGui::Dummy(ImVec2(80, 30));
             } else if (theme::GlowButton(("in" + a.user).c_str(), "Войти",
                                          ImVec2(84, 32), true)) {
-                DoLoginAsync(a.user, a.pass);
+                if (hasToken)
+                    DoLoginTokenAsync(a.user, a.token);
+                else
+                    DoLoginAsync(a.user, a.pass);
             }
-            Tooltip("Выйти из текущего Steam и войти в этот аккаунт");
+            Tooltip(hasToken ? "Выйти из текущего Steam и войти по refresh-токену"
+                             : "Выйти из текущего Steam и войти в этот аккаунт");
             ImGui::EndGroup();
 
             ImGui::SetCursorScreenPos(ImVec2(bx + 96, org.y + 12));
@@ -1065,7 +1117,23 @@ static void RenderAccountsPage(float w, float h) {
             }
             Tooltip("Копировать логин");
             ImGui::SameLine(0, 2);
-            if (theme::IconButton(("cp" + a.user).c_str(), g_icCopy.c_str(), 28,
+            if (hasToken) {
+                if (theme::IconButton(("ct" + a.user).c_str(), g_icCopy.c_str(), 28,
+                                      ImGui::GetColorU32(theme::AccentGlow(0.95f)))) {
+                    OpenClipboard(g_hwnd);
+                    EmptyClipboard();
+                    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, a.token.size() + 1);
+                    memcpy(GlobalLock(hg), a.token.c_str(), a.token.size() + 1);
+                    GlobalUnlock(hg);
+                    SetClipboardData(CF_TEXT, hg);
+                    CloseClipboard();
+                    PushToast(0, "Токен скопирован");
+                }
+                Tooltip("Копировать refresh-токен");
+                ImGui::SameLine(0, 2);
+            }
+            if (!hasToken &&
+                theme::IconButton(("cp" + a.user).c_str(), g_icCopy.c_str(), 28,
                                   ImGui::GetColorU32(p.dim))) {
                 OpenClipboard(g_hwnd);
                 EmptyClipboard();

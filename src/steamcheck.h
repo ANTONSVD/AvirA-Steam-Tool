@@ -3,7 +3,8 @@
 #include <string>
 
 CheckOutcome CheckSteamAccount(const std::string& user, const std::string& pass,
-                               const std::string& proxy);
+                                const std::string& proxy);
+CheckOutcome CheckSteamToken(const std::string& token, const std::string& proxy);
 
 struct BanResult {
     bool ok = false;

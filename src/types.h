@@ -6,11 +6,13 @@ enum class AccStatus { None, Checking, Valid, Guard, Invalid, Error, RateLimited
 struct Cred {
     std::string user;
     std::string pass;
+    std::string token;
 };
 
 struct Account {
     std::string user;
     std::string pass;
+    std::string token;
     AccStatus status = AccStatus::None;
     long long addedAt = 0;
     std::string ban;
