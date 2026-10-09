@@ -12,7 +12,9 @@
 #include <atomic>
 #include <deque>
 #include <cmath>
+#include <random>
 #include <commdlg.h>
+#include <shellapi.h>
 
 namespace app {
 
@@ -27,7 +29,7 @@ ImFont* g_fontIcon = nullptr;
 static const int kWinW = 1180;
 static const int kWinH = 760;
 
-enum Page { PageChecker = 0, PageAccounts, PageSettings };
+enum Page { PageChecker = 0, PageAccounts, PageSettings, PageReg };
 
 struct FeedItem {
     AccStatus st;
@@ -71,13 +73,24 @@ static struct {
     std::mutex mtx;
     std::atomic<bool> loginBusy{false};
     std::string loggingUser;
+    std::string regLogin;
+    std::string regPass;
+    std::string regPendingLogin;
+    std::string regPendingPass;
+    bool regGotData = false;
+    SignupBox regBox;
+    int regState = 0;
+    std::string regMsg;
+    std::vector<std::string> regLog;
+    std::atomic<bool> regBusy{false};
+    std::atomic<bool> regStop{false};
     std::string steamPath;
     std::string currentUser;
     bool steamRunning = false;
     long long lastSteamCheck = 0;
     float dispValid = 0, dispGuard = 0, dispBad = 0, dispErr = 0;
-    float navY[3] = {0, 0, 0};
-    float navHover[3] = {0, 0, 0};
+    float navY[4] = {0, 0, 0, 0};
+    float navHover[4] = {0, 0, 0, 0};
     ImVec2 winPos{}, winSize{};
     std::string dataDir;
     int accountCount = 0;
@@ -102,7 +115,7 @@ static std::string Ic(unsigned cp) {
 }
 
 static const std::string& IconNav(int i) {
-    static std::string icons[3] = {Ic(0xE945), Ic(0xE716), Ic(0xE713)};
+    static std::string icons[4] = {Ic(0xE945), Ic(0xE716), Ic(0xE713), Ic(0xE8FA)};
     return icons[i];
 }
 
@@ -410,6 +423,166 @@ static void DoLoginAsync(std::string user, std::string pass) {
     }).detach();
 }
 
+static void CopyText(const std::string& s, const char* toastMsg) {
+    if (s.empty()) return;
+    OpenClipboard(g_hwnd);
+    EmptyClipboard();
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, s.size() + 1);
+    memcpy(GlobalLock(hg), s.c_str(), s.size() + 1);
+    GlobalUnlock(hg);
+    SetClipboardData(CF_TEXT, hg);
+    CloseClipboard();
+    PushToast(0, toastMsg);
+}
+
+static std::mt19937& RegRng() {
+    static std::mt19937 rng((unsigned)std::chrono::steady_clock::now()
+                                .time_since_epoch()
+                                .count());
+    return rng;
+}
+
+static void RegLog(const std::string& line) {
+    std::lock_guard<std::mutex> l(S.mtx);
+    if (S.regLog.size() > 60) S.regLog.erase(S.regLog.begin());
+    S.regLog.push_back(line);
+}
+
+static void SignupCreateAsync() {
+    if (S.regBusy.exchange(true)) return;
+    S.regStop = false;
+    std::thread([]() {
+        std::string login = signup::GenLogin(RegRng());
+        std::string pass = signup::GenPassword(RegRng());
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regState = 0;
+            S.regMsg = "Создание почты...";
+        }
+        RegLog("генерация данных...");
+        SignupBox box;
+        if (!TempMailCreate(box)) {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = "Не удалось создать почту";
+            RegLog("почта: ошибка");
+            PushToast(3, "Не удалось создать временную почту");
+            S.regBusy = false;
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regPendingLogin = login;
+            S.regPendingPass = pass;
+            S.regGotData = true;
+            S.regBox = box;
+            S.regState = 1;
+            S.regMsg = "Почта готова";
+        }
+        RegLog("почта: " + box.email);
+        PushToast(1, "Почта готова: " + box.email);
+        S.regBusy = false;
+    }).detach();
+}
+
+static void SignupWatchAsync() {
+    if (S.regBusy.exchange(true)) return;
+    S.regStop = false;
+    std::thread([]() {
+        SignupBox box;
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            box = S.regBox;
+            S.regState = 2;
+            S.regMsg = "Ожидание письма...";
+        }
+        RegLog("слежу за ящиком " + box.email);
+        bool done = false;
+        for (int i = 0; i < 150 && !S.regStop.load(); i++) {
+            auto msgs = TempMailMessages(box);
+            std::string target;
+            for (auto& m : msgs) {
+                if (signup::LooksSteamMail(m.from, m.subject)) {
+                    target = m.id;
+                    std::lock_guard<std::mutex> l(S.mtx);
+                    S.regMsg = "Письмо: " + m.subject;
+                    RegLog("письмо: " + m.subject);
+                    break;
+                }
+            }
+            if (!target.empty()) {
+                std::string raw = TempMailRead(box, target);
+                std::string link = signup::ExtractVerifyLink(raw);
+                if (link.empty())
+                    link = signup::ExtractVerifyLink(signup::MessageText(raw));
+                if (link.empty()) {
+                    std::lock_guard<std::mutex> l(S.mtx);
+                    S.regState = 1;
+                    S.regMsg = "В письме нет ссылки";
+                    RegLog("в письме нет ссылки Steam");
+                    PushToast(3, "В письме нет ссылки подтверждения");
+                } else if (SteamVerifyGet(link)) {
+                    std::lock_guard<std::mutex> l(S.mtx);
+                    S.regState = 3;
+                    S.regMsg = "Почта подтверждена";
+                    RegLog("ссылка дёрнута, почта подтверждена");
+                    PushToast(1, "Почта подтверждена, заверши в браузере");
+                } else {
+                    std::lock_guard<std::mutex> l(S.mtx);
+                    S.regState = 1;
+                    S.regMsg = "Не удалось дёрнуть ссылку";
+                    RegLog("ссылка не открылась");
+                    PushToast(3, "Не удалось подтвердить почту");
+                }
+                done = true;
+                break;
+            }
+            for (int k = 0; k < 10 && !S.regStop.load(); k++)
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        if (!done && !S.regStop.load()) {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regState = 1;
+            S.regMsg = "Письмо не пришло";
+            RegLog("таймаут ожидания");
+            PushToast(2, "Письмо не пришло за 12 минут");
+        }
+        if (S.regStop.load()) {
+            std::lock_guard<std::mutex> l(S.mtx);
+            if (S.regState == 2) {
+                S.regState = 1;
+                S.regMsg = "Остановлено";
+            }
+            RegLog("слежка остановлена");
+        }
+        S.regBusy = false;
+    }).detach();
+}
+
+static void SignupToCatalog() {
+    std::string login, pass;
+    {
+        std::lock_guard<std::mutex> l(S.mtx);
+        login = util::Trim(S.regLogin);
+        pass = S.regPass;
+    }
+    if (login.empty() || pass.empty()) {
+        PushToast(2, "Укажи логин и пароль");
+        return;
+    }
+    Cred c;
+    c.user = login;
+    c.pass = pass;
+    S.store.AddOrUpdate(c, AccStatus::Valid);
+    S.store.Save(S.dataDir + "\\accounts.txt");
+    {
+        std::lock_guard<std::mutex> l(S.mtx);
+        S.regState = 4;
+        S.regMsg = "Сохранено в каталог";
+    }
+    RegLog("сохранено: " + login);
+    PushToast(1, "Аккаунт в каталоге: " + login);
+}
+
 static void DoLoginTokenAsync(std::string user, std::string token) {
     if (S.loginBusy.exchange(true)) return;
     S.loggingUser = user;
@@ -489,6 +662,7 @@ void Init() {
 }
 
 void Shutdown() {
+    S.regStop = true;
     S.checker.Stop();
     SaveSettings();
     S.store.Save(S.dataDir + "\\accounts.txt");
@@ -1372,6 +1546,155 @@ static void RenderSettingsPage(float w, float h) {
     ImGui::EndChild();
 }
 
+static void RenderRegPage(float w, float h) {
+    auto& p = theme::Pal();
+    {
+        std::lock_guard<std::mutex> l(S.mtx);
+        if (S.regGotData) {
+            S.regLogin = S.regPendingLogin;
+            S.regPass = S.regPendingPass;
+            S.regGotData = false;
+        }
+    }
+    int st;
+    std::string msg, email;
+    std::vector<std::string> log;
+    {
+        std::lock_guard<std::mutex> l(S.mtx);
+        st = S.regState;
+        msg = S.regMsg;
+        email = S.regBox.email;
+        log = S.regLog;
+    }
+    bool busy = S.regBusy.load();
+    bool polling = st == 2;
+
+    ImGui::PushFont(g_fontBold);
+    ImGui::TextUnformatted("Регистрация Steam-аккаунта");
+    ImGui::PopFont();
+    ImGui::Spacing();
+
+    ImVec2 org = ImGui::GetCursorScreenPos();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(org, ImVec2(org.x + w, org.y + h),
+                      ImGui::GetColorU32(ImVec4(p.panelSoft.x, p.panelSoft.y,
+                                                p.panelSoft.z, 0.42f)), 14);
+    dl->AddRect(org, ImVec2(org.x + w, org.y + h),
+                ImGui::GetColorU32(ImVec4(p.border.x, p.border.y, p.border.z, p.border.w)),
+                14, 0, 1.1f);
+
+    float panelTop = ImGui::GetCursorPosY();
+    ImGui::SetCursorPos(ImVec2(20, panelTop + 14));
+    ImGui::BeginGroup();
+    ImGui::PushFont(g_fontBold);
+    ImGui::TextUnformatted("Помощник авторегистрации");
+    ImGui::PopFont();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(p.dim.x, p.dim.y, p.dim.z, 0.85f));
+    ImGui::TextWrapped("1. Создай данные  2. Открой Steam Join в браузере, введи почту и кликни капчу  "
+                       "3. Нажми «Следить за почтой» — тула сама дёрнет ссылку из письма  "
+                       "4. Задай в браузере имя и пароль, заверши регистрацию  5. «В каталог»");
+    ImGui::PopStyleColor();
+    ImGui::Spacing();
+
+    ImGui::TextUnformatted("Логин:");
+    ImGui::SameLine(0, 8);
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputText("##rlogin", &S.regLogin);
+    ImGui::SameLine(0, 6);
+    if (theme::IconButton("##rgl", g_icRefresh.c_str(), 28))
+        S.regLogin = signup::GenLogin(RegRng());
+    Tooltip("Сгенерировать другой логин");
+    ImGui::SameLine(0, 16);
+    ImGui::TextUnformatted("Пароль:");
+    ImGui::SameLine(0, 8);
+    ImGui::SetNextItemWidth(200);
+    ImGui::InputText("##rpass", &S.regPass);
+    ImGui::SameLine(0, 6);
+    if (theme::IconButton("##rgp", g_icRefresh.c_str(), 28))
+        S.regPass = signup::GenPassword(RegRng());
+    Tooltip("Сгенерировать другой пароль");
+
+    ImGui::TextUnformatted("Почта:");
+    ImGui::SameLine(0, 8);
+    ImGui::PushFont(g_fontMono);
+    ImGui::TextUnformatted(email.empty() ? "-" : email.c_str());
+    ImGui::PopFont();
+    if (!email.empty()) {
+        ImGui::SameLine(0, 6);
+        if (theme::IconButton("##rgm", g_icCopy.c_str(), 28))
+            CopyText(email, "Почта скопирована");
+        Tooltip("Копировать почту");
+    }
+    ImGui::SameLine(0, 16);
+    const char* stTxt = "IDLE";
+    ImU32 stCol = ImGui::GetColorU32(p.dim);
+    if (st == 1) { stTxt = "READY"; stCol = ImGui::GetColorU32(theme::AccentGlow(0.95f)); }
+    else if (st == 2) { stTxt = "POLL"; stCol = ImGui::GetColorU32(p.guard); }
+    else if (st == 3) { stTxt = "OK"; stCol = ImGui::GetColorU32(p.valid); }
+    else if (st == 4) { stTxt = "DONE"; stCol = ImGui::GetColorU32(p.valid); }
+    theme::Badge(stTxt, stCol);
+    ImGui::Spacing();
+
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, busy ? 0.45f : 1.f);
+    if (theme::GlowButton("##rgmk", "Создать данные", ImVec2(170, 38), true)) {
+        if (!busy) SignupCreateAsync();
+    }
+    ImGui::PopStyleVar();
+    Tooltip("Сгенерировать логин, пароль и временную почту");
+    ImGui::SameLine(0, 8);
+    if (theme::GlowButton("##rgop", "Открыть Steam Join", ImVec2(190, 38), false))
+        ShellExecuteA(nullptr, "open", "https://store.steampowered.com/join/",
+                      nullptr, nullptr, SW_SHOWNORMAL);
+    Tooltip("Открыть страницу регистрации в браузере");
+    ImGui::SameLine(0, 8);
+    if (polling) {
+        if (theme::GlowButton("##rgst", "Стоп", ImVec2(130, 38), false))
+            S.regStop = true;
+        Tooltip("Остановить слежку за почтой");
+    } else {
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha,
+                            (busy || email.empty()) ? 0.45f : 1.f);
+        if (theme::GlowButton("##rgwt", "Следить за почтой", ImVec2(190, 38), true)) {
+            if (!busy && !email.empty()) SignupWatchAsync();
+        }
+        ImGui::PopStyleVar();
+        Tooltip("Ждать письмо Steam и дёрнуть ссылку (до 12 минут)");
+    }
+    ImGui::SameLine(0, 8);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha,
+                        (S.regLogin.empty() || S.regPass.empty()) ? 0.45f : 1.f);
+    if (theme::GlowButton("##rgct", "В каталог", ImVec2(130, 38), false)) {
+        if (!S.regLogin.empty() && !S.regPass.empty()) SignupToCatalog();
+    }
+    ImGui::PopStyleVar();
+    Tooltip("Сохранить login:password в каталог аккаунтов");
+    ImGui::Spacing();
+
+    if (polling) {
+        ImVec2 sp = ImGui::GetCursorScreenPos();
+        theme::Spinner(ImVec2(sp.x + 10, sp.y + 10), 9, 2.2f,
+                       ImGui::GetColorU32(theme::AccentGlow(0.95f)), 1.5f);
+        ImGui::Dummy(ImVec2(26, 20));
+        ImGui::SameLine(0, 2);
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(p.dim.x, p.dim.y, p.dim.z, 0.9f));
+    ImGui::TextUnformatted(msg.empty() ? "Готов" : msg.c_str());
+    ImGui::PopStyleColor();
+    ImGui::Spacing();
+
+    float used = ImGui::GetCursorPosY() - panelTop;
+    float lh = h - used - 14;
+    if (lh < 60) lh = 60;
+    ImGui::BeginChild("reglog", ImVec2(w - 40, lh), ImGuiChildFlags_None,
+                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+    ImGui::PushFont(g_fontMono);
+    for (auto& line : log)
+        ImGui::TextUnformatted(line.c_str());
+    ImGui::PopFont();
+    ImGui::EndChild();
+    ImGui::EndGroup();
+}
+
 static const ImVec4* kPresetsA() {
     static ImVec4 arr[6] = {
         ImVec4(0.545f, 0.361f, 1.000f, 1.f), ImVec4(0.302f, 0.863f, 0.698f, 1.f),
@@ -1553,8 +1876,8 @@ void Render() {
                     16, 0, 1.1f);
 
         ImGui::SetCursorPos(ImVec2(0, 10));
-        const char* labels[3] = {"Проверка", "Аккаунты", "Настройки"};
-        for (int i = 0; i < 3; i++) {
+        const char* labels[4] = {"Проверка", "Аккаунты", "Настройки", "Регистрация"};
+        for (int i = 0; i < 4; i++) {
             if (NavItem(i, labels[i], sideW)) {
                 if (S.page != i) {
                     S.pageDir = i > S.page ? 1.f : -1.f;
@@ -1595,6 +1918,7 @@ void Render() {
         case PageChecker: RenderCheckerPage(contentW, bodyH); break;
         case PageAccounts: RenderAccountsPage(contentW, bodyH); break;
         case PageSettings: RenderSettingsPage(contentW, bodyH); break;
+        case PageReg: RenderRegPage(contentW, bodyH); break;
     }
     ImGui::PopStyleVar();
     ImGui::EndGroup();

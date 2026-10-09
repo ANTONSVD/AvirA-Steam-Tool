@@ -175,17 +175,30 @@ public:
 
     RawResp Post(const std::string& host, const std::string& path,
                  const std::string& body, const std::string& cookie) {
-        return Request(L"POST", host, path, body, cookie);
+        return Request(L"POST", host, path, body, cookie,
+                       "application/x-www-form-urlencoded", "");
     }
 
     RawResp Get(const std::string& host, const std::string& path,
                 const std::string& cookie) {
-        return Request(L"GET", host, path, "", cookie);
+        return Request(L"GET", host, path, "", cookie, "", "");
+    }
+
+    RawResp PostJson(const std::string& host, const std::string& path,
+                     const std::string& body, const std::string& bearer) {
+        return Request(L"POST", host, path, body, "",
+                       "application/json", bearer);
+    }
+
+    RawResp GetAuth(const std::string& host, const std::string& path,
+                    const std::string& bearer) {
+        return Request(L"GET", host, path, "", "", "", bearer);
     }
 
 private:
     RawResp Request(const wchar_t* verb, const std::string& host, const std::string& path,
-                   const std::string& body, const std::string& cookie) {
+                   const std::string& body, const std::string& cookie,
+                   const std::string& contentType, const std::string& bearer) {
         RawResp r;
         if (!m_h) return r;
         if (wcscmp(verb, L"POST") == 0)
@@ -205,11 +218,17 @@ private:
         hdr += L"Accept: text/html,application/json,*/*;q=0.01\r\n";
         hdr += L"Accept-Language: en-US,en;q=0.9\r\n";
         if (wcscmp(verb, L"POST") == 0) {
-            hdr = L"Content-Type: application/x-www-form-urlencoded\r\n" + hdr;
-            hdr += L"Origin: https://steamcommunity.com\r\n";
-            hdr += L"Referer: https://steamcommunity.com/login/home/?goto=\r\n";
-            hdr += L"X-Requested-With: XMLHttpRequest\r\n";
+            if (contentType.empty())
+                hdr = L"Content-Type: application/x-www-form-urlencoded\r\n" + hdr;
+            else
+                hdr = L"Content-Type: " + ToWide(contentType) + L"\r\n" + hdr;
+            if (bearer.empty()) {
+                hdr += L"Origin: https://steamcommunity.com\r\n";
+                hdr += L"Referer: https://steamcommunity.com/login/home/?goto=\r\n";
+                hdr += L"X-Requested-With: XMLHttpRequest\r\n";
+            }
         }
+        if (!bearer.empty()) hdr += L"Authorization: Bearer " + ToWide(bearer) + L"\r\n";
         if (!cookie.empty()) hdr += L"Cookie: " + ToWide(cookie) + L"\r\n";
 
         DWORD bodyLen = (DWORD)body.size();
@@ -656,4 +675,86 @@ CheckOutcome CheckSteamToken(const std::string& token, const std::string& proxy)
 
     if (live) return {AccStatus::Valid, "", jc.sub, bi.text, bi.days};
     return {AccStatus::Valid, "offline", jc.sub, bi.text, bi.days};
+}
+
+static std::mt19937& SignupRng() {
+    static std::mt19937 rng((unsigned)std::chrono::steady_clock::now()
+                                .time_since_epoch()
+                                .count());
+    return rng;
+}
+
+bool TempMailCreate(SignupBox& box) {
+    box = SignupBox{};
+    HttpSession session;
+    if (!session.Ensure("")) return false;
+    RawResp d = session.Get("api.mail.tm", "/domains", "");
+    if (!d.ok || d.body.empty()) return false;
+    std::vector<std::string> domains;
+    size_t pos = 0;
+    while (true) {
+        size_t p = d.body.find("\"domain\"", pos);
+        if (p == std::string::npos) break;
+        size_t c = d.body.find(':', p + 8);
+        if (c == std::string::npos) break;
+        c++;
+        while (c < d.body.size() && (d.body[c] == ' ' || d.body[c] == '\t')) c++;
+        if (c < d.body.size() && d.body[c] == '"') {
+            c++;
+            size_t e = d.body.find('"', c);
+            if (e != std::string::npos && e - c > 3 && e - c < 64)
+                domains.push_back(d.body.substr(c, e - c));
+            pos = e == std::string::npos ? d.body.size() : e + 1;
+        } else {
+            pos = c + 1;
+        }
+    }
+    if (domains.empty()) return false;
+    box.domain = domains[SignupRng()() % domains.size()];
+    box.login = signup::GenMailLogin(SignupRng());
+    box.email = box.login + "@" + box.domain;
+    box.password.clear();
+    for (int i = 0; i < 12; i++) {
+        int v = (int)(SignupRng()() % 62);
+        box.password += (char)(v < 10 ? '0' + v : (v < 36 ? 'A' + v - 10 : 'a' + v - 36));
+    }
+    std::string jb = "{\"address\":\"" + box.email + "\",\"password\":\"" +
+                     box.password + "\"}";
+    RawResp a = session.PostJson("api.mail.tm", "/accounts", jb, "");
+    if (!a.ok && a.status != 201) return false;
+    if (a.body.find(box.email) == std::string::npos &&
+        a.body.find("\"id\"") == std::string::npos)
+        return false;
+    RawResp t = session.PostJson("api.mail.tm", "/token", jb, "");
+    if (!t.ok || t.body.empty()) return false;
+    box.token = jsonmini::GetString(t.body, "token");
+    return !box.token.empty();
+}
+
+std::vector<signup::MailMsg> TempMailMessages(const SignupBox& box) {
+    std::vector<signup::MailMsg> out;
+    if (box.token.empty()) return out;
+    HttpSession session;
+    if (!session.Ensure("")) return out;
+    RawResp r = session.GetAuth("api.mail.tm", "/messages", box.token);
+    if (!r.ok || r.body.empty()) return out;
+    return signup::ScanMessages(r.body);
+}
+
+std::string TempMailRead(const SignupBox& box, const std::string& id) {
+    if (box.token.empty() || id.empty()) return "";
+    HttpSession session;
+    if (!session.Ensure("")) return "";
+    RawResp r = session.GetAuth("api.mail.tm", "/messages/" + id, box.token);
+    if (!r.ok || r.body.empty()) return "";
+    return r.body;
+}
+
+bool SteamVerifyGet(const std::string& url) {
+    static const char* pre = "https://store.steampowered.com/";
+    if (url.compare(0, 30, pre) != 0) return false;
+    HttpSession session;
+    if (!session.Ensure("")) return false;
+    RawResp r = session.Get("store.steampowered.com", url.substr(29), "");
+    return r.ok || (r.status >= 200 && r.status < 400);
 }
