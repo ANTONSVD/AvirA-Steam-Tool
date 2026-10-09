@@ -215,8 +215,37 @@ std::vector<Cred> ParseCombos(const std::string& text) {
     return out;
 }
 
-void ExportHits(const std::string& path, const std::vector<Account>& items) {
+static bool LineHasToken(const std::string& l) {
+    size_t sep = l.find("----");
+    if (sep != std::string::npos && sep > 0 &&
+        steamtoken::LooksLikeJwt(util::Trim(l.substr(sep + 4))))
+        return true;
+    if (steamtoken::LooksLikeJwt(l)) return true;
+    size_t p1 = l.find(':');
+    if (p1 != std::string::npos && p1 > 0 &&
+        steamtoken::LooksLikeJwt(util::Trim(l.substr(p1 + 1))))
+        return true;
+    return false;
+}
+
+std::string StripTokenLines(const std::string& text) {
     std::string out;
+    for (auto& line : util::SplitLines(text)) {
+        std::string l = util::Trim(line);
+        if (l.empty() || l[0] == '#') {
+            out += line + "\n";
+            continue;
+        }
+        if (LineHasToken(l)) continue;
+        out += line + "\n";
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r'))
+        out.pop_back();
+    if (!out.empty()) out += "\n";
+    return out;
+}
+
+void ExportHits(const std::string& path, const std::vector<Account>& items) {    std::string out;
     for (auto& a : items) {
         if (a.status == AccStatus::Valid || a.status == AccStatus::Guard)
             out += a.user + ":" + (!a.token.empty() ? a.token : a.pass) + "\n";

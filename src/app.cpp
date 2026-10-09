@@ -75,10 +75,14 @@ static struct {
     std::string loggingUser;
     std::string regLogin;
     std::string regPass;
+    std::string regToken;
     std::string regPendingLogin;
     std::string regPendingPass;
     bool regGotData = false;
     SignupBox regBox;
+    JoinCtx regCtx;
+    std::string regGid;
+    bool regCtxReady = false;
     int regState = 0;
     std::string regMsg;
     std::vector<std::string> regLog;
@@ -323,6 +327,12 @@ static void DrainEvents() {
     if (S.checker.Running() && S.checker.Total() > 0 &&
         S.checker.Done() >= S.checker.Total()) {
         S.checker.Stop();
+        std::string stripped = StripTokenLines(S.comboText);
+        if (stripped != S.comboText) {
+            S.comboText = stripped;
+            util::WriteTextFile(S.dataDir + "\\combo.txt", S.comboText);
+            PushToast(0, "Токены убраны из поля проверки");
+        }
         std::string sum = "Проверка завершена · " +
                           std::to_string(S.checker.Hits()) + " valid / " +
                           std::to_string(S.checker.Guards()) + " 2fa";
@@ -484,6 +494,46 @@ static void SignupCreateAsync() {
     }).detach();
 }
 
+static bool WaitForVerifyLink(const SignupBox& box, std::string& link) {
+    link.clear();
+    for (int i = 0; i < 150 && !S.regStop.load(); i++) {
+        auto msgs = TempMailMessages(box);
+        std::string target;
+        for (auto& m : msgs) {
+            if (signup::LooksSteamMail(m.from, m.subject)) {
+                target = m.id;
+                std::lock_guard<std::mutex> l(S.mtx);
+                S.regMsg = "Письмо: " + m.subject;
+                RegLog("письмо: " + m.subject);
+                break;
+            }
+        }
+        if (!target.empty()) {
+            std::string raw = TempMailRead(box, target);
+            link = signup::ExtractVerifyLink(raw);
+            if (link.empty())
+                link = signup::ExtractVerifyLink(signup::MessageText(raw));
+            if (link.empty()) {
+                std::lock_guard<std::mutex> l(S.mtx);
+                S.regMsg = "В письме нет ссылки";
+                RegLog("в письме нет ссылки Steam");
+                return false;
+            }
+            if (SteamVerifyGet(link)) {
+                RegLog("ссылка дёрнута, почта подтверждена");
+                return true;
+            }
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = "Не удалось дёрнуть ссылку";
+            RegLog("ссылка не открылась");
+            return false;
+        }
+        for (int k = 0; k < 10 && !S.regStop.load(); k++)
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    return false;
+}
+
 static void SignupWatchAsync() {
     if (S.regBusy.exchange(true)) return;
     S.regStop = false;
@@ -496,64 +546,220 @@ static void SignupWatchAsync() {
             S.regMsg = "Ожидание письма...";
         }
         RegLog("слежу за ящиком " + box.email);
-        bool done = false;
-        for (int i = 0; i < 150 && !S.regStop.load(); i++) {
-            auto msgs = TempMailMessages(box);
-            std::string target;
-            for (auto& m : msgs) {
-                if (signup::LooksSteamMail(m.from, m.subject)) {
-                    target = m.id;
-                    std::lock_guard<std::mutex> l(S.mtx);
-                    S.regMsg = "Письмо: " + m.subject;
-                    RegLog("письмо: " + m.subject);
-                    break;
+        std::string link;
+        bool ok = WaitForVerifyLink(box, link);
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            if (ok) {
+                S.regState = 3;
+                S.regMsg = "Почта подтверждена";
+                PushToast(1, "Почта подтверждена, заверши в браузере");
+            } else if (S.regStop.load()) {
+                if (S.regState == 2) {
+                    S.regState = 1;
+                    S.regMsg = "Остановлено";
                 }
+                RegLog("слежка остановлена");
+            } else if (S.regState == 2) {
+                S.regState = 1;
+                S.regMsg = "Письмо не пришло";
+                RegLog("таймаут ожидания");
+                PushToast(2, "Письмо не пришло за 12 минут");
             }
-            if (!target.empty()) {
-                std::string raw = TempMailRead(box, target);
-                std::string link = signup::ExtractVerifyLink(raw);
-                if (link.empty())
-                    link = signup::ExtractVerifyLink(signup::MessageText(raw));
-                if (link.empty()) {
-                    std::lock_guard<std::mutex> l(S.mtx);
-                    S.regState = 1;
-                    S.regMsg = "В письме нет ссылки";
-                    RegLog("в письме нет ссылки Steam");
-                    PushToast(3, "В письме нет ссылки подтверждения");
-                } else if (SteamVerifyGet(link)) {
-                    std::lock_guard<std::mutex> l(S.mtx);
-                    S.regState = 3;
-                    S.regMsg = "Почта подтверждена";
-                    RegLog("ссылка дёрнута, почта подтверждена");
-                    PushToast(1, "Почта подтверждена, заверши в браузере");
-                } else {
-                    std::lock_guard<std::mutex> l(S.mtx);
-                    S.regState = 1;
-                    S.regMsg = "Не удалось дёрнуть ссылку";
-                    RegLog("ссылка не открылась");
-                    PushToast(3, "Не удалось подтвердить почту");
-                }
-                done = true;
+        }
+        S.regBusy = false;
+    }).detach();
+}
+
+static void SignupCaptchaAsync() {
+    if (S.regBusy.exchange(true)) return;
+    S.regStop = false;
+    std::thread([]() {
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = "Запрос капчи...";
+        }
+        RegLog("запрос капчи у Steam...");
+        JoinCtx ctx;
+        JoinCaptchaInfo cap;
+        if (!JoinBegin(ctx) || !JoinCaptcha(ctx, cap)) {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = "Капча не получена";
+            RegLog("капча: ошибка сети");
+            PushToast(3, "Не удалось получить капчу Steam");
+            S.regBusy = false;
+            return;
+        }
+        char tmp[MAX_PATH] = {0};
+        GetEnvironmentVariableA("TEMP", tmp, MAX_PATH);
+        std::string path = std::string(tmp) + "\\avira_captcha.html";
+        if (!util::WriteTextFile(path, signup::CaptchaPageHtml(cap.sitekey))) {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = "Не записать файл капчи";
+            S.regBusy = false;
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regCtx = ctx;
+            S.regGid = cap.gid;
+            S.regCtxReady = true;
+            S.regMsg = "Реши капчу в браузере, вставь токен";
+        }
+        RegLog("капча открыта в браузере");
+        PushToast(1, "Реши капчу и вставь токен");
+        ShellExecuteA(nullptr, "open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        S.regBusy = false;
+    }).detach();
+}
+
+static std::string JoinCodeMsg(int code, const std::string& details) {
+    if (code == 17) return "Почта заблокирована Steam (disposable)";
+    if (code == 101) return "Капча неверна или протухла";
+    if (code == 13) return "Битый email";
+    if (!details.empty() && details.size() < 160) return details;
+    return "ответ Steam: " + std::to_string(code);
+}
+
+static void SignupFullAutoAsync() {
+    if (S.regBusy.exchange(true)) return;
+    S.regStop = false;
+    std::thread([]() {
+        SignupBox box;
+        std::string login, pass, token, gid;
+        JoinCtx ctx;
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            box = S.regBox;
+            login = util::Trim(S.regLogin);
+            pass = S.regPass;
+            token = util::Trim(S.regToken);
+            gid = S.regGid;
+            ctx = S.regCtx;
+            S.regMsg = "Отправка email...";
+        }
+        if (token.size() < 64) {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = "Вставь токен капчи";
+            PushToast(2, "Сначала реши капчу и вставь токен");
+            S.regBusy = false;
+            return;
+        }
+        RegLog("verifyemail: " + box.email);
+        std::string creationId;
+        int code = -1;
+        std::string details;
+        if (!JoinVerifyEmail(ctx, box.email, gid, token, creationId, code, details)) {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = "Сеть недоступна";
+            PushToast(3, "Сеть недоступна");
+            S.regBusy = false;
+            return;
+        }
+        if (code != 1 || creationId.empty()) {
+            std::string m = JoinCodeMsg(code, details);
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = m;
+            RegLog("verifyemail отказ: " + m);
+            PushToast(3, m);
+            S.regBusy = false;
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regCtx = ctx;
+            S.regState = 2;
+            S.regMsg = "Письмо отправлено, жду...";
+        }
+        RegLog("creationid получен, жду письмо...");
+        std::string link;
+        if (!WaitForVerifyLink(box, link) || S.regStop.load()) {
+            std::lock_guard<std::mutex> l(S.mtx);
+            if (!S.regStop.load() && S.regState == 2) {
+                S.regState = 1;
+                S.regMsg = "Письмо не пришло";
+                PushToast(2, "Письмо не пришло за 12 минут");
+            }
+            S.regBusy = false;
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = "Почта подтверждена, создаю...";
+        }
+        bool verified = false;
+        for (int i = 0; i < 36 && !S.regStop.load(); i++) {
+            int v = JoinPollVerified(ctx, creationId);
+            if (v == 1) {
+                verified = true;
                 break;
+            }
+            if (v == 42 || v == 29) {
+                std::lock_guard<std::mutex> l(S.mtx);
+                S.regMsg = "Ошибка регистрации";
+                PushToast(3, "Steam отклонил регистрацию");
+                S.regBusy = false;
+                return;
+            }
+            if (v == 27) {
+                std::lock_guard<std::mutex> l(S.mtx);
+                S.regMsg = "Время вышло";
+                PushToast(3, "Время подтверждения вышло");
+                S.regBusy = false;
+                return;
             }
             for (int k = 0; k < 10 && !S.regStop.load(); k++)
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
         }
-        if (!done && !S.regStop.load()) {
+        if (!verified || S.regStop.load()) {
             std::lock_guard<std::mutex> l(S.mtx);
             S.regState = 1;
-            S.regMsg = "Письмо не пришло";
-            RegLog("таймаут ожидания");
-            PushToast(2, "Письмо не пришло за 12 минут");
+            S.regMsg = "Не дождался подтверждения";
+            S.regBusy = false;
+            return;
         }
-        if (S.regStop.load()) {
+        {
             std::lock_guard<std::mutex> l(S.mtx);
-            if (S.regState == 2) {
-                S.regState = 1;
-                S.regMsg = "Остановлено";
-            }
-            RegLog("слежка остановлена");
+            S.regCtx = ctx;
         }
+        if (!JoinCheckAvail(ctx, login, creationId)) {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = "Логин занят";
+            RegLog("логин занят: " + login);
+            PushToast(2, "Логин занят, сгенерируй другой");
+            S.regBusy = false;
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regCtx = ctx;
+            S.regMsg = "Создание аккаунта...";
+        }
+        JoinResult jr = JoinCreate(ctx, login, pass, creationId);
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regCtx = ctx;
+        }
+        if (!jr.ok) {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regMsg = jr.msg;
+            RegLog("create отказ: " + jr.msg);
+            PushToast(3, jr.msg);
+            S.regBusy = false;
+            return;
+        }
+        Cred c;
+        c.user = login;
+        c.pass = pass;
+        S.store.AddOrUpdate(c, AccStatus::Valid);
+        S.store.Save(S.dataDir + "\\accounts.txt");
+        {
+            std::lock_guard<std::mutex> l(S.mtx);
+            S.regState = 4;
+            S.regMsg = "Аккаунт создан";
+        }
+        RegLog("создан: " + login);
+        PushToast(1, "Аккаунт создан: " + login);
         S.regBusy = false;
     }).detach();
 }
@@ -1594,9 +1800,9 @@ static void RenderRegPage(float w, float h) {
     ImGui::TextUnformatted("Помощник авторегистрации");
     ImGui::PopFont();
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(p.dim.x, p.dim.y, p.dim.z, 0.85f));
-    ImGui::TextWrapped("1. Создай данные  2. Открой Steam Join в браузере, введи почту и кликни капчу  "
-                       "3. Нажми «Следить за почтой» — тула сама дёрнет ссылку из письма  "
-                       "4. Задай в браузере имя и пароль, заверши регистрацию  5. «В каталог»");
+    ImGui::TextWrapped("Авто: 1. Создай данные  2. Решить капчу (1 клик в браузере, токен скопируется сам)  "
+                       "3. Вставь токен и жми Поехали — дальше всё само: письмо, ссылка, имя, создание, каталог. "
+                       "Вручную: открой Steam Join в браузере и иди по шагам, почта и ссылка — через «Следить за почтой».");
     ImGui::PopStyleColor();
     ImGui::Spacing();
 
@@ -1637,6 +1843,28 @@ static void RenderRegPage(float w, float h) {
     else if (st == 3) { stTxt = "OK"; stCol = ImGui::GetColorU32(p.valid); }
     else if (st == 4) { stTxt = "DONE"; stCol = ImGui::GetColorU32(p.valid); }
     theme::Badge(stTxt, stCol);
+    ImGui::Spacing();
+
+    ImGui::TextUnformatted("Токен капчи:");
+    ImGui::SameLine(0, 8);
+    ImGui::SetNextItemWidth(300);
+    ImGui::InputText("##rhtok", &S.regToken);
+    Tooltip("Токен hCaptcha из страницы-минёра (вставляется автоматически копированием)");
+    ImGui::SameLine(0, 8);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, busy ? 0.45f : 1.f);
+    if (theme::GlowButton("##rgcap", "Решить капчу", ImVec2(170, 38), true)) {
+        if (!busy) SignupCaptchaAsync();
+    }
+    ImGui::PopStyleVar();
+    Tooltip("Получить капчу Steam и открыть минёр токена в браузере (1 клик)");
+    ImGui::SameLine(0, 8);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha,
+                        (busy || S.regToken.size() < 64 || email.empty()) ? 0.45f : 1.f);
+    if (theme::GlowButton("##rggo", "Поехали (авто)", ImVec2(170, 38), true)) {
+        if (!busy && S.regToken.size() >= 64 && !email.empty()) SignupFullAutoAsync();
+    }
+    ImGui::PopStyleVar();
+    Tooltip("Полная цепочка: email → письмо → ссылка → имя → создание → каталог");
     ImGui::Spacing();
 
     ImGui::PushStyleVar(ImGuiStyleVar_Alpha, busy ? 0.45f : 1.f);

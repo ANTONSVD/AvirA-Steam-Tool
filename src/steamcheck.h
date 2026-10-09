@@ -21,6 +21,32 @@ std::vector<signup::MailMsg> TempMailMessages(const SignupBox& box);
 std::string TempMailRead(const SignupBox& box, const std::string& id);
 bool SteamVerifyGet(const std::string& url);
 
+struct JoinCtx {
+    std::string cookies;
+    int count = 0;
+};
+
+struct JoinCaptchaInfo {
+    std::string gid;
+    int type = 0;
+    std::string sitekey;
+};
+
+bool JoinBegin(JoinCtx& ctx);
+bool JoinCaptcha(JoinCtx& ctx, JoinCaptchaInfo& out);
+bool JoinVerifyEmail(JoinCtx& ctx, const std::string& email,
+                     const std::string& gid, const std::string& captchaToken,
+                     std::string& creationId, int& code, std::string& details);
+int JoinPollVerified(JoinCtx& ctx, const std::string& creationId);
+bool JoinCheckAvail(JoinCtx& ctx, const std::string& name,
+                    const std::string& creationId);
+struct JoinResult {
+    bool ok = false;
+    std::string msg;
+};
+JoinResult JoinCreate(JoinCtx& ctx, const std::string& name,
+                     const std::string& pass, const std::string& creationId);
+
 struct BanResult {
     bool ok = false;
     std::string ban;

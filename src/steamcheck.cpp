@@ -758,3 +758,119 @@ bool SteamVerifyGet(const std::string& url) {
     RawResp r = session.Get("store.steampowered.com", url.substr(29), "");
     return r.ok || (r.status >= 200 && r.status < 400);
 }
+
+static int JsonInt(const std::string& j, const std::string& key) {
+    std::string pat = "\"" + key + "\"";
+    size_t p = j.find(pat);
+    if (p == std::string::npos) return -1;
+    p = j.find(':', p + pat.size());
+    if (p == std::string::npos) return -1;
+    p++;
+    while (p < j.size() && (j[p] == ' ' || j[p] == '\t')) p++;
+    bool neg = false;
+    if (p < j.size() && j[p] == '-') {
+        neg = true;
+        p++;
+    }
+    if (p >= j.size() || j[p] < '0' || j[p] > '9') return -1;
+    int v = 0;
+    while (p < j.size() && j[p] >= '0' && j[p] <= '9') {
+        v = v * 10 + (j[p] - '0');
+        p++;
+    }
+    return neg ? -v : v;
+}
+
+static RawResp JoinPost(JoinCtx& ctx, const std::string& path,
+                        const std::string& body) {
+    HttpSession session;
+    RawResp r;
+    if (!session.Ensure("")) return r;
+    ctx.count++;
+    r = session.Post("store.steampowered.com", path, body, ctx.cookies);
+    if (!r.setCookie.empty()) ctx.cookies = MergeCookies(ctx.cookies, r.setCookie);
+    return r;
+}
+
+bool JoinBegin(JoinCtx& ctx) {
+    ctx = JoinCtx{};
+    HttpSession session;
+    if (!session.Ensure("")) return false;
+    RawResp r = session.Get("store.steampowered.com", "/join/", "");
+    if (!r.setCookie.empty()) ctx.cookies = MergeCookies(ctx.cookies, r.setCookie);
+    return r.status == 200 && !ctx.cookies.empty();
+}
+
+bool JoinCaptcha(JoinCtx& ctx, JoinCaptchaInfo& out) {
+    out = JoinCaptchaInfo{};
+    RawResp r = JoinPost(ctx, "/join/refreshcaptcha/", "count=" +
+                         std::to_string(ctx.count + 1) + "&hcaptcha=1");
+    if (r.status != 200 || r.body.empty()) return false;
+    out.gid = jsonmini::GetString(r.body, "gid");
+    out.type = JsonInt(r.body, "type");
+    out.sitekey = jsonmini::GetString(r.body, "sitekey");
+    if (out.gid.empty() || out.gid == "-1" || out.type != 3 || out.sitekey.empty())
+        return false;
+    return true;
+}
+
+bool JoinVerifyEmail(JoinCtx& ctx, const std::string& email,
+                     const std::string& gid, const std::string& captchaToken,
+                     std::string& creationId, int& code, std::string& details) {
+    creationId.clear();
+    code = -1;
+    details.clear();
+    std::string b = "email=" + util::UrlEncode(email) +
+                    "&captchagid=" + util::UrlEncode(gid) +
+                    "&captcha_text=" + util::UrlEncode(captchaToken) +
+                    "&elang=0&init_id=&guest=0";
+    RawResp r = JoinPost(ctx, "/join/ajaxverifyemail", b);
+    if (r.status != 200 || r.body.empty()) return false;
+    code = JsonInt(r.body, "success");
+    details = jsonmini::GetString(r.body, "details");
+    if (code == 1) creationId = jsonmini::GetString(r.body, "sessionid");
+    return true;
+}
+
+int JoinPollVerified(JoinCtx& ctx, const std::string& creationId) {
+    if (creationId.empty()) return -1;
+    RawResp r = JoinPost(ctx, "/join/ajaxcheckemailverified",
+                         "creationid=" + util::UrlEncode(creationId));
+    if (r.status != 200 || r.body.empty()) return -1;
+    return JsonInt(r.body, "success");
+}
+
+bool JoinCheckAvail(JoinCtx& ctx, const std::string& name,
+                    const std::string& creationId) {
+    if (name.empty() || creationId.empty()) return false;
+    std::string b = "accountname=" + util::UrlEncode(name) +
+                    "&count=" + std::to_string(ctx.count + 1) +
+                    "&creationid=" + util::UrlEncode(creationId);
+    RawResp r = JoinPost(ctx, "/join/checkavail/", b);
+    if (r.status != 200 || r.body.empty()) return false;
+    return jsonmini::GetBool(r.body, "bAvailable");
+}
+
+JoinResult JoinCreate(JoinCtx& ctx, const std::string& name,
+                     const std::string& pass, const std::string& creationId) {
+    JoinResult jr;
+    if (name.empty() || pass.empty() || creationId.empty()) {
+        jr.msg = "пустые данные";
+        return jr;
+    }
+    std::string b = "accountname=" + util::UrlEncode(name) +
+                    "&password=" + util::UrlEncode(pass) +
+                    "&count=" + std::to_string(ctx.count + 1) +
+                    "&lt=0&creation_sessionid=" + util::UrlEncode(creationId) +
+                    "&embedded_appid=0&guest=0";
+    RawResp r = JoinPost(ctx, "/join/createaccount/", b);
+    if (r.status != 200 || r.body.empty()) {
+        jr.msg = "http=" + std::to_string(r.status);
+        return jr;
+    }
+    jr.ok = jsonmini::GetBool(r.body, "bSuccess");
+    jr.msg = jsonmini::GetString(r.body, "details");
+    if (jr.msg.empty() && !jr.ok) jr.msg = "создание отклонено";
+    if (jr.ok) g_thr.ReportSuccess();
+    return jr;
+}

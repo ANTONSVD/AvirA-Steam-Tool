@@ -238,4 +238,25 @@ inline std::string ExtractVerifyLink(const std::string& text) {
     return "";
 }
 
+inline std::string CaptchaPageHtml(const std::string& sitekey) {
+    std::string h =
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<title>AvirA captcha</title>"
+        "<script src=\"https://js.hcaptcha.com/1/api.js?render=explicit&hl=ru\" async defer></script>"
+        "</head><body style=\"background:#14141f;color:#eee;font-family:sans-serif;padding:24px\">"
+        "<h3>AvirA: реши капчу, токен скопируется сам</h3>"
+        "<div id=\"cap\"></div><br>"
+        "<textarea id=\"tok\" rows=\"5\" cols=\"90\" readonly "
+        "placeholder=\"токен появится здесь — вставь его в AvirA\"></textarea>"
+        "<script>var w=null;"
+        "function go(){try{w=hcaptcha.render(\"cap\",{sitekey:\"SITEKEY\",theme:\"dark\","
+        "callback:function(t){var a=document.getElementById(\"tok\");a.value=t;a.select();"
+        "try{document.execCommand(\"copy\");}catch(e){}}});}catch(e){setTimeout(go,500);}}"
+        "var i=setInterval(function(){if(typeof hcaptcha!==\"undefined\"){clearInterval(i);go();}},200);"
+        "</script></body></html>";
+    size_t p = h.find("SITEKEY");
+    if (p != std::string::npos) h.replace(p, 7, sitekey);
+    return h;
+}
+
 }

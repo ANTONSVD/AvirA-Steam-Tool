@@ -23,4 +23,5 @@ private:
 };
 
 std::vector<Cred> ParseCombos(const std::string& text);
+std::string StripTokenLines(const std::string& text);
 void ExportHits(const std::string& path, const std::vector<Account>& items);

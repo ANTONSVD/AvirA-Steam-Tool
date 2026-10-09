@@ -77,8 +77,7 @@ int main() {
     {
         auto v = ParseCombos("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.aaaa");
         CHECK(v.empty());
-    }
-    {
+    }    {
         AccountStore st;
         Cred c;
         c.user = "gamer1";
@@ -106,6 +105,24 @@ int main() {
             hd.assign(buf, n);
         }
         CHECK(hd == "gamer1:" + tok + "\n");
+    }
+
+    {
+        std::string mixed = "user1:pass1\n"
+                            "gamer1:" + tok + "\n"
+                            "gamer2----" + tok + "\n" +
+                            tok + "\n"
+                            "# comment\n"
+                            "user2:p2:mail:mpp\n"
+                            "\n";
+        std::string stripped = StripTokenLines(mixed);
+        CHECK(stripped.find(tok) == std::string::npos);
+        CHECK(stripped.find("user1:pass1") != std::string::npos);
+        CHECK(stripped.find("user2:p2:mail:mpp") != std::string::npos);
+        CHECK(stripped.find("# comment") != std::string::npos);
+        CHECK(ParseCombos(stripped).size() == 2);
+        CHECK(StripTokenLines("user1:pass1\n").find("user1:pass1") != std::string::npos);
+        CHECK(StripTokenLines("").empty());
     }
 
     if (g_fail == 0) printf("accounts: ALL OK\n");

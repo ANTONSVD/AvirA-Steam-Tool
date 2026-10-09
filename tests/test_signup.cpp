@@ -97,6 +97,13 @@ int main() {
         CHECK(signup::HtmlUnescape("a&amp;b&lt;c&gt;") == "a&b<c>");
         CHECK(signup::StripTags("<p>Hi <b>there</b></p>").find("Hi") != std::string::npos);
     }
+    {
+        std::string pg = signup::CaptchaPageHtml("test-sitekey-123");
+        CHECK(pg.find("test-sitekey-123") != std::string::npos);
+        CHECK(pg.find("js.hcaptcha.com") != std::string::npos);
+        CHECK(pg.find("hcaptcha.render") != std::string::npos);
+        CHECK(pg.find("SITEKEY") == std::string::npos);
+    }
 
     if (g_fail == 0) printf("signup: ALL OK\n");
     return g_fail == 0 ? 0 : 1;
