@@ -10,6 +10,7 @@ public:
     bool AddOrUpdate(const Cred& cred, AccStatus st);
     void SetBan(const std::string& user, const std::string& ban, int days);
     void SetSteamId(const std::string& user, const std::string& steamid);
+    void SetToken(const std::string& user, const std::string& token);
     bool Remove(const std::string& user);
     void Clear();
     Account* Find(const std::string& user);

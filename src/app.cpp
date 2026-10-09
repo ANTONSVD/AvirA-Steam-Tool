@@ -186,7 +186,13 @@ static void LoadComboFile() {
         return;
     }
     S.comboText = data;
-    PushToast(0, "Загружено аккаунтов: " + std::to_string(ParseCombos(data).size()));
+    util::WriteTextFile(S.dataDir + "\\combo.txt", data);
+    int nTok = 0;
+    for (auto& c : ParseCombos(data))
+        if (!c.token.empty()) nTok++;
+    std::string t = "Загружено аккаунтов: " + std::to_string(ParseCombos(data).size());
+    if (nTok > 0) t += " (токенов: " + std::to_string(nTok) + ")";
+    PushToast(0, t);
 }
 
 static void LoadProxyFile() {
@@ -209,6 +215,23 @@ static void StartChecker() {
     if (combos.empty()) {
         PushToast(2, "Добавьте аккаунты: login:password или refresh-токен");
         return;
+    }
+    util::WriteTextFile(S.dataDir + "\\combo.txt", S.comboText);
+    int merged = 0;
+    for (auto& c : combos) {
+        if (c.token.empty()) continue;
+        Account* a = S.store.Find(c.user);
+        if (!a) continue;
+        a->token = c.token;
+        if (a->steamid.empty()) {
+            steamtoken::JwtClaims jc = steamtoken::ParseJwt(c.token);
+            if (jc.ok) a->steamid = jc.sub;
+        }
+        merged++;
+    }
+    if (merged > 0) {
+        S.store.Save(S.dataDir + "\\accounts.txt");
+        PushToast(1, "Токен привязан к каталогу: " + std::to_string(merged));
     }
     if (S.skipKnown) {
         std::vector<std::string> known;
@@ -438,6 +461,8 @@ void Init() {
     steamcheck::SetBanCheck(S.checkBans);
     steamcheck::SetLogPath(S.dataDir + "\\ban_debug.log");
     S.store.Load(S.dataDir + "\\accounts.txt");
+    std::string combo;
+    if (util::ReadTextFile(S.dataDir + "\\combo.txt", combo)) S.comboText = combo;
 
     g_icPlay = Ic(0xE768);
     g_icStop = Ic(0xE71A);
@@ -467,6 +492,7 @@ void Shutdown() {
     S.checker.Stop();
     SaveSettings();
     S.store.Save(S.dataDir + "\\accounts.txt");
+    util::WriteTextFile(S.dataDir + "\\combo.txt", S.comboText);
 }
 
 static float EaseBack(float t) {

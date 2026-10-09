@@ -127,6 +127,15 @@ void AccountStore::SetSteamId(const std::string& user, const std::string& steami
     }
 }
 
+void AccountStore::SetToken(const std::string& user, const std::string& token) {
+    for (auto& a : m_items) {
+        if (a.user == user) {
+            if (!token.empty()) a.token = token;
+            return;
+        }
+    }
+}
+
 bool AccountStore::Remove(const std::string& user) {
     for (size_t i = 0; i < m_items.size(); i++) {
         if (m_items[i].user == user) {
