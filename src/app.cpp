@@ -1569,18 +1569,21 @@ static void RenderRegPage(float w, float h) {
     bool busy = S.regBusy.load();
     bool polling = st == 2;
 
+    float pageStart = ImGui::GetCursorPosY();
     ImGui::PushFont(g_fontBold);
     ImGui::TextUnformatted("Регистрация Steam-аккаунта");
     ImGui::PopFont();
     ImGui::Spacing();
 
-    ImGui::BeginChild("regmain", ImVec2(w, h), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+    ImGui::BeginChild("regmain", ImVec2(w, h - (ImGui::GetCursorPosY() - pageStart)),
+                      ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
+    float ph = ImGui::GetContentRegionAvail().y;
     ImVec2 org = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    dl->AddRectFilled(org, ImVec2(org.x + w, org.y + h),
+    dl->AddRectFilled(org, ImVec2(org.x + w, org.y + ph),
                       ImGui::GetColorU32(ImVec4(p.panelSoft.x, p.panelSoft.y,
                                                 p.panelSoft.z, 0.42f)), 14);
-    dl->AddRect(org, ImVec2(org.x + w, org.y + h),
+    dl->AddRect(org, ImVec2(org.x + w, org.y + ph),
                 ImGui::GetColorU32(ImVec4(p.border.x, p.border.y, p.border.z, p.border.w)),
                 14, 0, 1.1f);
 
@@ -1684,10 +1687,10 @@ static void RenderRegPage(float w, float h) {
     ImGui::Spacing();
 
     float used = ImGui::GetCursorPosY() - panelTop;
-    float lh = h - used - 14;
+    float lh = ph - used - 12;
     if (lh < 60) lh = 60;
     ImGui::BeginChild("reglog", ImVec2(w - 40, lh), ImGuiChildFlags_None,
-                      ImGuiWindowFlags_AlwaysVerticalScrollbar);
+                      ImGuiWindowFlags_None);
     ImGui::PushFont(g_fontMono);
     for (auto& line : log)
         ImGui::TextUnformatted(line.c_str());
