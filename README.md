@@ -101,7 +101,7 @@ Steam должен быть установлен. Логин с 2FA потреб
 ## Вход по refresh-токену
 
 `steamctl.cpp:LoginByToken` (как `steam_login.py`):
-- JWT парсится (`sub` = steamid), имя аккаунта = lowercase логина
+- JWT парсится (`sub` = steamid), логин не нужен: имя резолвится из локального `loginusers.vdf` по `SteamID` (явный `login:токен` имеет приоритет, фолбэк — `sub`)
 - `crc32(name)` → hex без ведущих нулей + `"1"` = ключ `ConnectCache`
 - Токен шифруется DPAPI (`CryptProtectData`, entropy = имя, description `BObfuscateBuffer`) → hex
 - Убиваются все процессы Steam (`steam`, `steamservice`, `steamwebhelper`, `steamerrorreporter`, `streaming_client`)

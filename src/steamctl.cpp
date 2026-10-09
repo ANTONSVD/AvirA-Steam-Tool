@@ -208,15 +208,6 @@ SteamLoginResult LoginByToken(const std::string& user, const std::string& token)
     if (!jc.ok) return SteamLoginResult::BadToken;
     std::string exe = GetSteamPath();
     if (exe.empty()) return SteamLoginResult::NoSteam;
-
-    std::string name = user;
-    for (auto& c : name)
-        if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
-    if (name.empty()) name = jc.sub;
-
-    std::string blob = ObfuscateToken(name, token);
-    if (blob.empty()) return SteamLoginResult::Failed;
-
     size_t slash = exe.find_last_of("\\/");
     std::string root = slash == std::string::npos ? "." : exe.substr(0, slash);
     std::string cfgDir = root + "\\config";
@@ -235,7 +226,24 @@ SteamLoginResult LoginByToken(const std::string& user, const std::string& token)
     if (!util::ReadTextFile(localVdf, local))
         local = "\"UserLocalConfigStore\"\n{\n\t\"Software\"\n\t{\n\t\t\"Valve\"\n\t\t{\n\t\t\t\"Steam\"\n\t\t\t{\n\t\t\t\t\"ConnectCache\"\n\t\t\t\t{\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n";
     if (!util::ReadTextFile(configVdf, config)) return SteamLoginResult::NoWrite;
-    if (!util::ReadTextFile(usersVdf, users)) users = "\"users\"\n{\n}\n";
+    bool hasUsers = util::ReadTextFile(usersVdf, users);
+    if (!hasUsers) users = "\"users\"\n{\n}\n";
+
+    std::string given = user;
+    for (auto& c : given)
+        if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+    std::string name;
+    if (!given.empty() && given != jc.sub) {
+        name = given;
+    } else if (hasUsers) {
+        name = steamtoken::ResolveAccountName(users, jc.sub);
+        for (auto& c : name)
+            if (c >= 'A' && c <= 'Z') c = (char)(c + 32);
+    }
+    if (name.empty()) name = given.empty() ? jc.sub : given;
+
+    std::string blob = ObfuscateToken(name, token);
+    if (blob.empty()) return SteamLoginResult::Failed;
 
     std::string key = steamtoken::CrcKey(name);
     long long ts = util::NowMs() / 1000;

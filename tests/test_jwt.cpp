@@ -144,6 +144,21 @@ int main() {
         CHECK(blk2b.find("\"MostRecent\"\t\t\"0\"") != std::string::npos);
     }
 
+    {
+        std::string lu = "\"users\"\n{\n\t\"76561198000000001\"\n\t{\n"
+                         "\t\t\"AccountName\"\t\t\"FirstUser\"\n\t\t\"SteamID\"\t\t\"76561198000000001\"\n"
+                         "\t\t\"MostRecent\"\t\t\"1\"\n\t}\n"
+                         "\t\"76561198000000002\"\n\t{\n\t\t\"AccountName\"\t\t\"second\"\n"
+                         "\t\t\"MostRecent\"\t\t\"0\"\n\t}\n}\n";
+        CHECK(steamtoken::ResolveAccountName(lu, "76561198000000001") == "FirstUser");
+        CHECK(steamtoken::ResolveAccountName(lu, "76561198000000002") == "second");
+        CHECK(steamtoken::ResolveAccountName(lu, "76561198000000003") == "");
+        CHECK(steamtoken::ResolveAccountName("", "76561198000000001") == "");
+        CHECK(steamtoken::ChildValue(lu, lu.find('{'),
+                                     steamtoken::MatchBrace(lu, lu.find('{')),
+                                     "Nope") == "");
+    }
+
     if (g_fail == 0) printf("jwt: ALL OK\n");
     return g_fail == 0 ? 0 : 1;
 }

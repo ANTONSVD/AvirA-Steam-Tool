@@ -361,6 +361,56 @@ inline bool FindUsersBlock(const std::string& t, VdfBlock& users) {
     return FindDeep(t, root, rend, "users", users);
 }
 
+inline std::string ChildValue(const std::string& t, size_t open, size_t close,
+                              const std::string& key) {
+    size_t pos = open + 1;
+    while (pos < close) {
+        size_t save = pos;
+        std::string k;
+        if (!ReadQuoted(t, pos, k)) {
+            pos = save + 1;
+            continue;
+        }
+        size_t p = pos;
+        while (p < t.size() && (t[p] == ' ' || t[p] == '\t')) p++;
+        if (p < t.size() && t[p] == '{') {
+            size_t end = MatchBrace(t, p);
+            pos = (end == std::string::npos) ? save + 1 : end + 1;
+            continue;
+        }
+        if (k == key && p < t.size() && t[p] == '"') {
+            size_t v0 = p + 1;
+            size_t v1 = t.find('"', v0);
+            if (v1 == std::string::npos || v1 > close) return "";
+            return t.substr(v0, v1 - v0);
+        }
+        if (p < t.size() && t[p] == '"') {
+            size_t v1 = t.find('"', p + 1);
+            pos = (v1 == std::string::npos) ? save + 1 : v1 + 1;
+        }
+    }
+    return "";
+}
+
+inline std::string ResolveAccountName(const std::string& usersVdf,
+                                      const std::string& sid) {
+    if (usersVdf.empty() || sid.empty()) return "";
+    VdfBlock users;
+    if (!FindUsersBlock(usersVdf, users)) return "";
+    for (auto& b : ChildBlocks(usersVdf, users.open, users.close)) {
+        if (b.key == sid) {
+            std::string n = ChildValue(usersVdf, b.open, b.close, "AccountName");
+            if (!n.empty()) return n;
+        }
+        std::string id = ChildValue(usersVdf, b.open, b.close, "SteamID");
+        if (id == sid) {
+            std::string n = ChildValue(usersVdf, b.open, b.close, "AccountName");
+            if (!n.empty()) return n;
+        }
+    }
+    return "";
+}
+
 inline bool PatchLoginUsersVdf(std::string& t, const std::string& name,
                                const std::string& sid,
                                const std::string& timestamp) {
