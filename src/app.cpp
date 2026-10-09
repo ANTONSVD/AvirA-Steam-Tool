@@ -1574,6 +1574,7 @@ static void RenderRegPage(float w, float h) {
     ImGui::PopFont();
     ImGui::Spacing();
 
+    ImGui::BeginChild("regmain", ImVec2(w, h), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
     ImVec2 org = ImGui::GetCursorScreenPos();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(org, ImVec2(org.x + w, org.y + h),
@@ -1693,6 +1694,7 @@ static void RenderRegPage(float w, float h) {
     ImGui::PopFont();
     ImGui::EndChild();
     ImGui::EndGroup();
+    ImGui::EndChild();
 }
 
 static const ImVec4* kPresetsA() {
